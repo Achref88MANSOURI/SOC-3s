@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+import requests
+
+from config import THEHIVE_API_KEY, THEHIVE_URL
+
+REQUEST_TIMEOUT = 15
+
+
+def _headers():
+    return {
+        "Authorization": f"Bearer {THEHIVE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _thehive_get(path: str, params: dict | None = None) -> dict | list:
+    resp = requests.get(
+        f"{THEHIVE_URL}/api{path}",
+        headers=_headers(),
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _thehive_post(path: str, body: dict) -> dict | list:
+    resp = requests.post(
+        f"{THEHIVE_URL}/api{path}",
+        headers=_headers(),
+        json=body,
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def search_open_cases(
+    observables: list[str] | None = None,
+    host: str | None = None,
+    user: str | None = None,
+) -> list[dict]:
+    should_clauses = []
+
+    if observables:
+        for obs in observables:
+            should_clauses.append({
+                "terms": {"observable": [obs]},
+            })
+
+    if host:
+        should_clauses.append({"match": {"host": host}})
+
+    if user:
+        should_clauses.append({"match": {"user": user}})
+
+    if not should_clauses:
+        return []
+
+    query = {
+        "query": {
+            "bool": {
+                "should": should_clauses,
+                "minimum_should_match": 1,
+            }
+        },
+        "filter": [
+            {"terms": {"status": ["Open", "InProgress"]}},
+        ],
+    }
+
+    try:
+        result = _thehive_post("/v1/query", query)
+        cases = result if isinstance(result, list) else result.get("data", [])
+        return [
+            {
+                "case_id": c.get("_id", c.get("id", "")),
+                "title": c.get("title", ""),
+                "severity": c.get("severity", 0),
+                "status": c.get("status", ""),
+                "tags": c.get("tags", []),
+                "description": c.get("description", ""),
+                "host": c.get("host", ""),
+                "user": c.get("user", ""),
+                "observables": c.get("observables", []),
+                "created_at": c.get("createdAt", ""),
+            }
+            for c in cases
+        ]
+    except requests.exceptions.RequestException:
+        return []
+
+
+def search_closed_cases(
+    rule_uuid: str | None = None,
+    observables: list[str] | None = None,
+) -> list[dict]:
+    should_clauses = []
+
+    if rule_uuid:
+        should_clauses.append({"match": {"rule_uuid": rule_uuid}})
+
+    if observables:
+        for obs in observables:
+            should_clauses.append({"terms": {"observable": [obs]}})
+
+    if not should_clauses:
+        return []
+
+    query = {
+        "query": {
+            "bool": {
+                "should": should_clauses,
+                "minimum_should_match": 1,
+            }
+        },
+        "filter": [
+            {"terms": {"status": ["Resolved", "Closed"]}},
+        ],
+        "size": 20,
+        "sort": [{"createdAt": "desc"}],
+    }
+
+    try:
+        result = _thehive_post("/v1/query", query)
+        cases = result if isinstance(result, list) else result.get("data", [])
+        return [
+            {
+                "case_id": c.get("_id", c.get("id", "")),
+                "title": c.get("title", ""),
+                "severity": c.get("severity", 0),
+                "status": c.get("status", ""),
+                "tags": c.get("tags", []),
+                "resolution": c.get("resolution", ""),
+                "summary": c.get("summary", ""),
+                "created_at": c.get("createdAt", ""),
+            }
+            for c in cases
+        ]
+    except requests.exceptions.RequestException:
+        return []
+
+
+def get_case_full(case_id: str) -> dict | None:
+    try:
+        case = _thehive_get(f"/v1/case/{case_id}")
+        if isinstance(case, dict):
+            return {
+                "case_id": case.get("_id", case.get("id", case_id)),
+                "title": case.get("title", ""),
+                "description": case.get("description", ""),
+                "severity": case.get("severity", 0),
+                "status": case.get("status", ""),
+                "tags": case.get("tags", []),
+                "metrics": case.get("metrics", {}),
+                "custom_fields": case.get("customFields", {}),
+                "created_at": case.get("createdAt", ""),
+                "owner": case.get("owner", ""),
+                "summary": case.get("summary", ""),
+            }
+        return None
+    except requests.exceptions.RequestException:
+        return None

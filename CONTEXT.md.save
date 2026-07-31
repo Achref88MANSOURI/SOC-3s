@@ -1,0 +1,219 @@
+# SOC Triage Agent Service — Full Context
+
+## What this is
+AI-powered SOC alert triage service. Takes raw security alerts from Security Onion,
+investigates them like a senior analyst, produces a structured verdict with reasoning.
+Called by n8n via HTTP, returns triage_result{} for case actions in TheHive.
+
+## Stack
+- Python, FastAPI, LangGraph
+- LLM: Qwen3 (local, OpenAI-compatible endpoint at http://llm-vm:8080/v1)
+- Vector DB: Qdrant
+- Cache/dedup: Redis
+- Detection: Security Onion (Suricata + Sigma/ElastAlert + YARA/Strelka)
+- Case management: TheHive 5
+- TI enrichment: Cortex
+- CMDB: iTop
+- SOAR: n8n (calls this service)
+
+## Project structure
+```
+agent-service/
+  main.py              # FastAPI app, POST /triage endpoint
+  graph.py             # LangGraph state machine (4 nodes)
+  nodes/
+    correlate.py       # Node 1: pure Python, no LLM, correlation engine
+    investigate.py     # Node 2: Agent 1, ReAct + tools, evidence gathering
+    analyze.py         # Node 3: Agent 2, single LLM call, verdict
+    format_output.py   # Node 4: pure Python, build final triage_result
+  tools/
+    cortex.py          # DONE — Cortex TI analyzer wrapper
+    itop.py            # asset context from iTop CMDB
+    thehive.py         # case search, correlation queries
+    elasticsearch.py   # Security Onion ES queries (related alerts, behavior)
+    sigma_rules.py     # read Sigma rule YAML from disk (FP conditions, MITRE tags)
+    qdrant.py          # RAG retrieval (MITRE ATT&CK, CVE, playbooks)
+  prompts/
+    investigator.py    # Agent 1 system prompt + 5 investigation profiles
+    analyst.py         # Agent 2 system prompt + output schema
+  schemas/
+    canonical_alert.py # Pydantic models for all schemas
+  config.py            # env var loading
+  .env                 # secrets (never commit)
+```
+
+## Pipeline flow
+
+```
+n8n → POST /triage (canonical_alert{})
+         │
+         ▼
+    Node 1: CORRELATE (pure Python)
+    ├── Check 1: Redis fingerprint dedup
+    │     key = hash(rule_uuid + src + dst + user), window=5min
+    │     match → return {action: "deduplicated"}
+    ├── Check 2: entity match (TheHive open cases)
+    │     same host OR user OR shared observable
+    │     match → mode="merge", load existing_case_context
+    ├── Check 3: story match (MITRE-adjacent, starts inert)
+    │     match → mode="merge", reason="kill_chain_progression"
+    └── no match → mode="new"
+         │
+         ▼
+    Node 2: INVESTIGATE (Agent 1, LangGraph ReAct)
+    mode=new:  full investigation, max 8 tool calls
+    mode=merge: delta only (what this alert adds), max 5 tool calls
+    tools: cortex, itop, elasticsearch, thehive, sigma_rules, qdrant
+    output: evidence_package{} or delta_evidence{}
+         │
+         ▼
+    Node 3: ANALYZE (Agent 2, single LLM call, no tools)
+    mode=new:  full verdict
+      - likelihood: unlikely|possible|likely|near_certain
+      - impact_if_true: minor|moderate|severe|critical
+      - verdict: true_positive|false_positive|needs_review
+      - mitre_mapping: [{tactic, technique, sub_technique, confidence, basis}]
+      - reasoning: (every claim cites a specific evidence field)
+      - recommended_action: create_case|close_fp|needs_review
+      - summary: 3-5 sentence analyst-readable brief
+    mode=merge: delta assessment
+      - severity_change, new_mitre_stages, scope_change
+      - urgency: escalate|routine_merge
+      - recommended_action: merge_and_retier|merge_quiet
+         │
+         ▼
+    Node 4: FORMAT_OUTPUT (pure Python)
+    - apply severity lookup table (likelihood × impact → severity)
+    - build final triage_result{}
+    - return to n8n
+```
+
+## Severity lookup table
+```
+                minor    moderate   severe    critical
+unlikely        low      low        medium    medium
+possible        low      medium     high      high
+likely          medium   high       high      critical
+near_certain    medium   high       critical  critical
+```
+
+## canonical_alert{} schema (input from n8n)
+```json
+{
+  "alert_id": "string",
+  "timestamp": "ISO8601",
+  "source_engine": "sigma|suricata|yara",
+  "investigation_profile": "network_threat|endpoint_behavior|malicious_file|network_anomaly|log_anomaly",
+  "rule": {
+    "name": "string",
+    "uuid": "string",
+    "native_severity": 1-4,
+    "category": "string|null",
+    "product": "string|null"
+  },
+  "host": {"hostname": "string|null", "ip": ["string"], "os": {}},
+  "user": {"name": "string|null", "id": "string|null"},
+  "network": null,
+  "process": null,
+  "file": null,
+  "observables": {
+    "external_ips": ["string"],
+    "domains": ["string"],
+    "urls": ["string"],
+    "hashes": {"md5": [], "sha1": [], "sha256": [], "sha512": []}
+  },
+  "thehive_alert_id": "string",
+  "thehive_observable_ids": {}
+}
+```
+
+## triage_result{} schema (output to n8n)
+```json
+{
+  "alert_id": "string",
+  "action": "deduplicated|create_case|close_fp|needs_review|merge_quiet|merge_and_retier",
+  "verdict": "true_positive|false_positive|needs_review|null",
+  "severity": "low|medium|high|critical|null",
+  "likelihood": "string|null",
+  "impact_if_true": "string|null",
+  "mitre_mapping": [],
+  "reasoning": "string",
+  "summary": "string",
+  "merge_into_case": "string|null",
+  "severity_change": "string|null",
+  "urgency": "escalate|routine_merge|null",
+  "evidence_package": {},
+  "investigation_trace": []
+}
+```
+
+## Investigation profiles (Agent 1 behavior)
+```
+network_threat (Suricata):
+  focus: TI on IPs/domains, asset lookup, related connections, volume
+  do not query: process ancestry, command_line, user auth
+
+endpoint_behavior (Sigma + process fields):
+  focus: rule FP conditions, process ancestry, hash reputation,
+         user behavior, related alerts on same host/user
+  do not query: network flow details
+
+malicious_file (YARA/Strelka):
+  focus: hash reputation (all types), Zeek session origin,
+         host that received it, same hash on other hosts
+  do not query: process ancestry, user auth
+
+network_anomaly (Sigma + network fields):
+  focus: rule FP conditions, IP/domain TI, asset context
+
+log_anomaly (Sigma, no process, no network):
+  focus: what log source triggered, rule FP conditions,
+         user/entity history, alert pattern in 24h
+```
+
+## Key design decisions
+- Two agents, not one: Agent 1 gathers evidence (tool-using ReAct),
+  Agent 2 judges it (no tools, pure reasoning). Failure modes are
+  different and measured separately.
+- Agent 2 never sees raw log data — only Agent 1's structured summaries.
+  This is the prompt injection defense.
+- Severity is NOT a free model output — model produces likelihood +
+  impact_if_true, severity comes from the lookup table in code.
+- Exact duplicates never reach the LLM (Redis dedup in Node 1).
+- All tools are read-only. No agent writes to TheHive, Cortex, or ES.
+- max_iterations=8 (Agent 1, new), 5 (Agent 1, merge), 1 (Agent 2).
+- GBNF grammar constrains Agent 2 output to valid JSON schema.
+- LLM served via OpenAI-compatible endpoint — backend swappable
+  (llama.cpp now, vLLM+GPU later) without touching agent code.
+
+## Environment variables (.env)
+```
+CORTEX_URL=http://172.20.24.221:9001
+CORTEX_API_KEY="TwhXOJdzwRzNmvi2ZFK4WRcRFyUHu31B"
+THEHIVE_URL=http://172.20.24.221:9000
+THEHIVE_API_KEY="pupQEs2RmnaTI099maWBVVQRIy9zQYPs"
+ITOP_URL=http://172.20.24.223
+ITOP_USER=admin
+auth_pwd:iTopPassword123!
+ES_URL=http://<so_host>:9200
+ES_API_KEY=<key>
+LLM_BASE_URL=http://172.20.24.225:8080/v1
+LLM_MODEL=qwen3-30b-a3b
+QDRANT_URL=http://localhost:6333
+REDIS_URL=redis://localhost:6379
+SIGMA_RULES_PATH=/opt/so/rules/sigma
+```
+
+## Build order
+1. tools/ — each tool as standalone testable function (CORTEX DONE)
+2. schemas/canonical_alert.py — Pydantic models
+3. nodes/correlate.py — Redis + TheHive correlation, no LLM
+4. nodes/investigate.py — Agent 1, ReAct, all tools wired
+5. nodes/analyze.py — Agent 2, single call, GBNF output
+6. nodes/format_output.py — severity table, triage_result builder
+7. graph.py — LangGraph state machine wiring all nodes
+8. main.py — FastAPI wrapper
+
+## Current status
+- tools/cortex.py: DONE, tested
+- everything else: TODO

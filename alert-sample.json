@@ -1,0 +1,550 @@
+[
+  {
+    "headers": {
+      "host": "172.20.24.220:5679",
+      "user-agent": "python-requests/2.32.5",
+      "accept-encoding": "gzip, deflate",
+      "accept": "application/json;charset=utf-8",
+      "connection": "keep-alive",
+      "content-type": "application/json",
+      "content-length": "7503"
+    },
+    "params": {},
+    "query": {},
+    "body": {
+      "@timestamp": "2026-07-29T12:07:41Z",
+      "sigma_level": "high",
+      "rule": {
+        "product": "windows",
+        "name": "Execution Of Non-Existing File",
+        "category": "process_creation",
+        "uuid": "71158e3f-df67-472b-930e-7d287acaa3e1"
+      },
+      "event_data": {
+        "agent": {
+          "id": "7f490b9b-a12d-442b-9111-6d1fbb4771d5",
+          "type": "endpoint",
+          "version": "9.0.8"
+        },
+        "process": {
+          "Ext": {
+            "ancestry": [
+              "Q+f77KCNzRTJtAWPmSXK7Q",
+              "p/7Nx984Zub/1SZsRUNnTQ"
+            ]
+          },
+          "parent": {
+            "real_user": {
+              "name": "prince",
+              "id": 1000
+            },
+            "interactive": false,
+            "start": "2026-05-08T15:00:57.24Z",
+            "working_directory": "/",
+            "pid": 2847,
+            "entity_id": "Q+f77KCNzRTJtAWPmSXK7Q",
+            "executable": "/usr/lib/systemd/systemd",
+            "args": [
+              "/usr/lib/systemd/systemd",
+              "--user",
+              "--deserialize=26"
+            ],
+            "name": "systemd",
+            "real_group": {
+              "name": "prince",
+              "id": 1000
+            },
+            "args_count": 3,
+            "user": {
+              "name": "prince",
+              "id": 1000
+            },
+            "command_line": "/usr/lib/systemd/systemd --user --deserialize=26",
+            "supplemental_groups": [
+              {
+                "name": "adm",
+                "id": 4
+              },
+              {
+                "name": "cdrom",
+                "id": 24
+              },
+              {
+                "name": "sudo",
+                "id": 27
+              },
+              {
+                "name": "dip",
+                "id": 30
+              },
+              {
+                "name": "plugdev",
+                "id": 46
+              },
+              {
+                "name": "lpadmin",
+                "id": 120
+              },
+              {
+                "name": "sambashare",
+                "id": 131
+              },
+              {
+                "name": "ollama",
+                "id": 993
+              }
+            ],
+            "group": {
+              "name": "prince",
+              "id": 1000
+            }
+          },
+          "group_leader": {
+            "real_user": {
+              "name": "prince",
+              "id": 1000
+            },
+            "interactive": false,
+            "start": "2026-06-10T19:24:19.83Z",
+            "working_directory": "/var/snap/snapd-desktop-integration/387",
+            "pid": 2304541,
+            "entity_id": "WJtX2LyS9+lnWscAuFZI4Q",
+            "executable": "/snap/snapd/27591/usr/bin/snap",
+            "args": [
+              "/snap/snapd/current/usr/bin/snap",
+              "run",
+              "snapd-desktop-integration"
+            ],
+            "name": "snap",
+            "real_group": {
+              "name": "prince",
+              "id": 1000
+            },
+            "args_count": 3,
+            "same_as_process": true,
+            "user": {
+              "name": "prince",
+              "id": 1000
+            },
+            "supplemental_groups": [
+              {
+                "name": "adm",
+                "id": 4
+              },
+              {
+                "name": "cdrom",
+                "id": 24
+              },
+              {
+                "name": "sudo",
+                "id": 27
+              },
+              {
+                "name": "dip",
+                "id": 30
+              },
+              {
+                "name": "plugdev",
+                "id": 46
+              },
+              {
+                "name": "lpadmin",
+                "id": 120
+              },
+              {
+                "name": "sambashare",
+                "id": 131
+              },
+              {
+                "name": "ollama",
+                "id": 993
+              }
+            ],
+            "group": {
+              "name": "prince",
+              "id": 1000
+            }
+          },
+          "previous": [
+            {
+              "args": [
+                "/usr/lib/systemd/systemd",
+                "--user",
+                "--deserialize=26"
+              ],
+              "args_count": 3,
+              "executable": "/usr/lib/systemd/systemd"
+            },
+            {
+              "args": [
+                "/usr/lib/systemd/systemd-executor",
+                "--deserialize",
+                "38",
+                "--log-level",
+                "info",
+                "--log-target",
+                "auto"
+              ],
+              "args_count": 7,
+              "executable": "/usr/lib/systemd/systemd-executor"
+            },
+            {
+              "args": [
+                "/usr/bin/snap",
+                "run",
+                "snapd-desktop-integration"
+              ],
+              "args_count": 3,
+              "executable": "/usr/bin/snap"
+            }
+          ],
+          "real_user": {
+            "name": "prince",
+            "id": 1000
+          },
+          "interactive": false,
+          "start": "2026-06-10T19:24:19.83Z",
+          "pid": 2304541,
+          "working_directory": "/var/snap/snapd-desktop-integration/387",
+          "entity_id": "WJtX2LyS9+lnWscAuFZI4Q",
+          "executable": "/snap/snapd/27591/usr/bin/snap",
+          "args": [
+            "/snap/snapd/current/usr/bin/snap",
+            "run",
+            "snapd-desktop-integration"
+          ],
+          "session_leader": {
+            "real_user": {
+              "name": "prince",
+              "id": 1000
+            },
+            "interactive": false,
+            "start": "2026-06-10T19:24:19.83Z",
+            "working_directory": "/var/snap/snapd-desktop-integration/387",
+            "pid": 2304541,
+            "entity_id": "WJtX2LyS9+lnWscAuFZI4Q",
+            "executable": "/snap/snapd/27591/usr/bin/snap",
+            "args": [
+              "/snap/snapd/current/usr/bin/snap",
+              "run",
+              "snapd-desktop-integration"
+            ],
+            "name": "snap",
+            "real_group": {
+              "name": "prince",
+              "id": 1000
+            },
+            "args_count": 3,
+            "same_as_process": true,
+            "user": {
+              "name": "prince",
+              "id": 1000
+            },
+            "supplemental_groups": [
+              {
+                "name": "adm",
+                "id": 4
+              },
+              {
+                "name": "cdrom",
+                "id": 24
+              },
+              {
+                "name": "sudo",
+                "id": 27
+              },
+              {
+                "name": "dip",
+                "id": 30
+              },
+              {
+                "name": "plugdev",
+                "id": 46
+              },
+              {
+                "name": "lpadmin",
+                "id": 120
+              },
+              {
+                "name": "sambashare",
+                "id": 131
+              },
+              {
+                "name": "ollama",
+                "id": 993
+              }
+            ],
+            "group": {
+              "name": "prince",
+              "id": 1000
+            }
+          },
+          "entry_leader": {
+            "parent": {
+              "start": "2026-05-08T15:00:19.06Z",
+              "pid": 1,
+              "entity_id": "p/7Nx984Zub/1SZsRUNnTQ"
+            },
+            "real_user": {
+              "name": "prince",
+              "id": 1000
+            },
+            "interactive": false,
+            "start": "2026-05-08T15:00:57.24Z",
+            "working_directory": "/",
+            "pid": 2847,
+            "entry_meta": {
+              "type": "init"
+            },
+            "entity_id": "Q+f77KCNzRTJtAWPmSXK7Q",
+            "executable": "/usr/lib/systemd/systemd",
+            "args": [
+              "/usr/lib/systemd/systemd",
+              "--user",
+              "--deserialize=26"
+            ],
+            "name": "systemd",
+            "real_group": {
+              "name": "prince",
+              "id": 1000
+            },
+            "args_count": 3,
+            "same_as_process": false,
+            "user": {
+              "name": "prince",
+              "id": 1000
+            },
+            "supplemental_groups": [
+              {
+                "name": "adm",
+                "id": 4
+              },
+              {
+                "name": "cdrom",
+                "id": 24
+              },
+              {
+                "name": "sudo",
+                "id": 27
+              },
+              {
+                "name": "dip",
+                "id": 30
+              },
+              {
+                "name": "plugdev",
+                "id": 46
+              },
+              {
+                "name": "lpadmin",
+                "id": 120
+              },
+              {
+                "name": "sambashare",
+                "id": 131
+              },
+              {
+                "name": "ollama",
+                "id": 993
+              }
+            ],
+            "group": {
+              "name": "prince",
+              "id": 1000
+            }
+          },
+          "name": "snap",
+          "real_group": {
+            "name": "prince",
+            "id": 1000
+          },
+          "args_count": 3,
+          "user": {
+            "name": "prince",
+            "id": 1000
+          },
+          "command_line": "/snap/snapd/current/usr/bin/snap run snapd-desktop-integration",
+          "hash": {
+            "sha1": "646f618a23d1c046a579ec9c75e2c7b2d16b1424",
+            "sha256": "1f9bc7f0bbe42df9327f1324f40e3d94f86ec77c0dfca489e1c227ce6bfdf2c8",
+            "md5": "46397c78538d5270b041d82f773cdd39"
+          },
+          "supplemental_groups": [
+            {
+              "name": "adm",
+              "id": 4
+            },
+            {
+              "name": "cdrom",
+              "id": 24
+            },
+            {
+              "name": "sudo",
+              "id": 27
+            },
+            {
+              "name": "dip",
+              "id": 30
+            },
+            {
+              "name": "plugdev",
+              "id": 46
+            },
+            {
+              "name": "lpadmin",
+              "id": 120
+            },
+            {
+              "name": "sambashare",
+              "id": 131
+            },
+            {
+              "name": "ollama",
+              "id": 993
+            }
+          ],
+          "group": {
+            "name": "prince",
+            "id": 1000
+          }
+        },
+        "metadata": {
+          "input": {
+            "beats": {
+              "host": {
+                "ip": "172.20.130.102"
+              }
+            }
+          },
+          "index": "logs-endpoint.events.process-trustshield"
+        },
+        "_index": ".ds-logs-endpoint.events.process-trustshield-2026.07.05-000004",
+        "message": "Endpoint process event",
+        "tags": [
+          "elastic-agent",
+          "input-nodemanager",
+          "beats_input_codec_plain_applied",
+          "events.process"
+        ],
+        "@timestamp": "2026-07-29T12:07:24.879377Z",
+        "ecs": {
+          "version": "8.10.0"
+        },
+        "related": {
+          "ip": [
+            "127.0.0.1",
+            "::1",
+            "192.168.1.74",
+            "fe80::286f:d277:a3f3:9e2d"
+          ]
+        },
+        "data_stream": {
+          "namespace": "trustshield",
+          "type": "logs",
+          "dataset": "endpoint.events.process"
+        },
+        "elastic": {
+          "agent": {
+            "id": "7f490b9b-a12d-442b-9111-6d1fbb4771d5"
+          }
+        },
+        "host": {
+          "hostname": "soc-Vostro-3910",
+          "os": {
+            "Ext": {
+              "variant": "Ubuntu"
+            },
+            "kernel": "6.8.0-111-generic #111-Ubuntu SMP PREEMPT_DYNAMIC Sat Apr 11 23:16:02 UTC 2026",
+            "name": "Linux",
+            "family": "ubuntu",
+            "type": "linux",
+            "version": "24.04.4",
+            "platform": "ubuntu",
+            "full": "Ubuntu 24.04.4"
+          },
+          "ip": [
+            "127.0.0.1",
+            "::1",
+            "192.168.1.74",
+            "fe80::286f:d277:a3f3:9e2d"
+          ],
+          "name": "soc-vostro-3910",
+          "id": "a9e51c011ed5f51c99053e606576e6fc",
+          "mac": [
+            "20-88-10-8b-f9-15",
+            "c8-8a-9a-67-6a-ec"
+          ],
+          "architecture": "x86_64"
+        },
+        "@version": "1",
+        "_id": "XVnFrZ8BstL_s-ZWGEdg",
+        "event": {
+          "sequence": 6681177,
+          "ingested": "2026-07-29T12:06:43Z",
+          "kind": "event",
+          "created": "2026-07-29T12:07:24.8793777Z",
+          "module": "endpoint",
+          "action": [
+            "exec"
+          ],
+          "id": "OTruYTM2luquICsz++++dpFu",
+          "category": [
+            "process"
+          ],
+          "type": [
+            "start"
+          ],
+          "dataset": "endpoint.events.process",
+          "outcome": "unknown"
+        },
+        "num_matches": 106,
+        "user": {
+          "Ext": {
+            "real": {
+              "name": "prince",
+              "id": 1000
+            }
+          },
+          "name": "prince",
+          "id": 1000
+        },
+        "group": {
+          "Ext": {
+            "real": {
+              "name": "prince",
+              "id": 1000
+            }
+          },
+          "name": "prince",
+          "id": 1000
+        },
+        "num_hits": 344
+      },
+      "event": {
+        "severity": 4,
+        "module": "sigma",
+        "dataset": "sigma.alert",
+        "severity_label": "high"
+      },
+      "ioc": {
+        "schema_version": "1.0",
+        "source_engine": "sigma",
+        "rule": {
+          "severity": "high",
+          "name": "Execution Of Non-Existing File",
+          "uuid": "71158e3f-df67-472b-930e-7d287acaa3e1"
+        },
+        "dataset": "sigma.alert"
+      },
+      "tags": "alert",
+      "_id": "2lDFrZ8BiUkBvoTN_CZT",
+      "_index": ".ds-logs-detections.alerts-so-2026.07.29-000140",
+      "num_hits": 40,
+      "num_matches": 40,
+      "source_system": "security-onion",
+      "severity_filter": "medium_and_above"
+    },
+    "webhookUrl": "http://localhost:5678/webhook/so-alerts",
+    "executionMode": "production"
+  }
+]

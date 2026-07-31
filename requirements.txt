@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+langgraph
+langchain
+langchain-community
+langchain-openai
+pydantic
+requests
+python-dotenv
+qdrant-client
+fastembed
+redis
+pyyaml
