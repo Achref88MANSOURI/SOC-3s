@@ -323,8 +323,9 @@ None — no new external services were wired up this session.
 - [x] ~~Whether agent-service runs on the same host as cortex-mcp~~ — resolved: it doesn't (172.20.24.224 vs 172.20.24.221), which is exactly why Phase 4 was reverted.
 - [ ] **Zero test coverage:** `tools/cortex.py`, `tools/elasticsearch.py`, `tools/itop.py`, `tools/registry.py`, `tools/sigma_rules.py`, `prompts/perceiver.py`. See Phase 10's coverage audit above for detail. Not filled in this session per explicit instruction not to pad the test count speculatively — flagged here so the gap is visible, not silently accepted.
 - [ ] **Partial test coverage:** `tools/thehive.py` — only `get_full_alert_with_analysis` is directly tested; `search_open_cases`, `search_closed_cases`, `get_case_full`, and all 6 Phase 8 write functions have no direct test (the write functions are only exercised indirectly, via mocks, by `test_case_action.py`).
-- [ ] **`SOC-3s-ARCHITECTURE-v2.md` §12 (Schemas) has drifted significantly from `schemas.py`** — see Phase 10's drift audit above for the full itemized list (missing `merge_into_case` on `CorrelationResult`, nonexistent `ExistingCaseContext`/`ToolCallLogEntry`/`Impact`/`Likelihood`/`Severity`, `TriageState` shape mismatch, dead `PerceptionResult` model, and more). Not fixed this session per explicit instruction to list drift, not rewrite the doc.
+- [x] ~~`SOC-3s-ARCHITECTURE-v2.md` §12 (Schemas) has drifted significantly from `schemas.py`~~ — **fixed in the post-Phase-10 cleanup commit** (see below): §12 rewritten field-for-field against the actual `schemas.py`, and `PerceptionResult` (confirmed dead — referenced nowhere outside its own definition) removed from `schemas.py` itself, not just documented as gone.
 - [ ] **`SOC-3s-ARCHITECTURE-v2.md` §15 (File Tree) is stale throughout** — never updated as phases completed, unlike §19. Don't use it as a source of truth for what's done; use §19 instead.
+- [ ] **`PerceptionResult` is still referenced in §6, §7, §15, and §19** (lines describing Agent 1/2's I/O contracts and historical build-order entries) even though it no longer exists in `schemas.py` as of the post-Phase-10 cleanup below. Only §12 was in scope for that cleanup commit (explicit instruction); these other mentions are now stale in the same way §12 was, but weren't touched. Worth a follow-up pass if/when §6/§7 get revisited.
 
 ## Test results
 | Phase | Tests run | Pass | Fail | Notes |
@@ -427,3 +428,45 @@ deployment activity outside this session's scope — the code is now in a state
 where that trial can start, contingent on the live-verification items above
 (TheHive write endpoints, ES firewall, Sigma rules path) actually being checked
 against the real environment first.
+
+## Post-Phase-10 cleanup: schemas.py and §12 resync
+
+Targeted cleanup based directly on Phase 10's drift audit findings, done as a
+single focused commit before live n8n connection — not a new phase.
+
+**`schemas.py` changes (the only actual code change):**
+- Removed `PerceptionResult` — confirmed dead via `grep` across the entire
+  codebase including tests: referenced nowhere outside its own class
+  definition. `nodes/perceive.py` writes `TriageState`'s flat `mitre_mapping`/
+  `correlation_result` fields directly; nothing ever constructed or consumed
+  a `PerceptionResult` instance.
+- `ExistingCaseContext` and `ToolCallLogEntry`: confirmed (again) that neither
+  exists in `schemas.py` — nothing to remove. `CorrelationResult.
+  existing_case_context` is and was a plain `dict`.
+- `CorrelationResult.merge_into_case`: confirmed it already exists in
+  `schemas.py` (added back in Phase 3) — the earlier drift-audit finding was
+  about §12 not documenting it, not about it being missing from code.
+- `TriageState`: confirmed it's already flat, matching `graph.py`/`nodes/
+  perceive.py`'s actual usage — no code change needed, only §12 needed to
+  catch up.
+
+**`SOC-3s-ARCHITECTURE-v2.md` §12 changes:** rewritten field-for-field against
+the post-cleanup `schemas.py` — every `Optional`/default/type mismatch from
+the Phase 10 audit corrected (`Rule.uuid` required not Optional, no
+`Rule.source_engine`, `Host.hostname` Optional, `CortexResult.score` is `int`
+not `float`, `CanonicalAlert.host`/`.user`/etc. Optional,
+`thehive_observable_ids` is a `dict` not `list[str]`, `EvidencePackage.
+threat_intel` is `list[CortexResult]` not `list[dict]`, `TriageResult.
+mitre_mapping` is `list[MitreMapping]` not `list[dict]`, and `TriageState` is
+flat with no `perception_result` key). `TriageRequest`, `ExistingCaseContext`,
+`ToolCallLogEntry`, and the `Impact`/`Likelihood`/`Severity` Literal aliases
+removed from the doc since none exist in code. `PerceptionResult` removed from
+§12 to match its removal from `schemas.py`.
+
+**Explicitly out of scope, left alone:** §6, §7, §15, and §19 still reference
+`PerceptionResult` in prose (Agent 1/2 I/O descriptions and historical
+build-order log entries) — the user scoped this cleanup to §12 only. Recorded
+above in Known Issues as a residual, not silently dropped.
+
+112/112 tests still passing after the `schemas.py` change (`PerceptionResult`
+being dead code, its removal has zero behavioral effect).

@@ -872,19 +872,29 @@ agent-service container/host. Mount as read-only volume if containerized.
 
 ## 12. Schemas — All Pydantic Models
 
-All models in `schemas.py`.
+All models in `schemas.py`. **Resynced against the actual file** as a cleanup
+pass following Phase 10's drift audit (see `CHANGES.md`) — this section had
+drifted substantially from the code across the phased build; what's below is
+verified against `schemas.py` field-for-field, not aspirational. Three things
+that don't exist in code were removed from this section rather than
+documented as if real: `TriageRequest` (legacy model, never added),
+`ExistingCaseContext` (a plain `dict` is used instead — see Correlation
+models below), `ToolCallLogEntry` (no alias exists; code uses
+`InvestigationTraceEntry` directly everywhere), and the `Impact`/
+`Likelihood`/`Severity` `Literal` type aliases (§18 bug 5 — never added,
+nothing imports them). `PerceptionResult` was also removed from both the doc
+and `schemas.py` itself in this same cleanup — it was defined but never
+referenced anywhere in the codebase (Agent 1's output is threaded through
+`TriageState`'s flat `mitre_mapping`/`correlation_result` fields instead, not
+a bundled object).
 
 ### Input models
 
 ```python
 class AlertWebhookPayload(BaseModel):
     thehive_alert_id: str
-    raw_alert: dict           # n8n Alert Builder output
-    asset_context: dict = {}  # iTop response
-
-class TriageRequest(BaseModel):
-    """Legacy — for direct testing without TheHive fetch."""
-    canonical_alert: CanonicalAlert
+    raw_alert: dict[str, Any]           # n8n Alert Builder output
+    asset_context: dict[str, Any] = {}  # iTop response
 ```
 
 ### CanonicalAlert and sub-models
@@ -892,43 +902,43 @@ class TriageRequest(BaseModel):
 ```python
 class Rule(BaseModel):
     name: str
-    uuid: Optional[str]
-    native_severity: int              # 1-4 (TheHive scale)
-    category: Optional[str]
-    product: Optional[str]
-    source_engine: str                # "sigma" | "suricata" | "yara" | "unknown"
+    uuid: str
+    native_severity: int
+    category: Optional[str] = None
+    product: Optional[str] = None
+    # No source_engine field here — it lives on CanonicalAlert instead.
 
 class Host(BaseModel):
-    hostname: str
+    hostname: Optional[str] = None
     ip: list[str] = []
-    os: dict = {}
+    os: dict[str, Any] = {}
 
 class User(BaseModel):
-    name: Optional[str]
-    id: Optional[str]
+    name: Optional[str] = None
+    id: Optional[str] = None
 
 class Network(BaseModel):
-    src_ip: Optional[str]
-    dst_ip: Optional[str]
-    src_port: Optional[int]
-    dst_port: Optional[int]
-    protocol: Optional[str]
-    bytes_total: Optional[int]
-    packets_total: Optional[int]
+    src_ip: Optional[str] = None
+    dst_ip: Optional[str] = None
+    src_port: Optional[int] = None
+    dst_port: Optional[int] = None
+    protocol: Optional[str] = None
+    bytes_total: Optional[int] = None
+    packets_total: Optional[int] = None
 
 class Process(BaseModel):
-    pid: Optional[int]
-    name: Optional[str]
-    path: Optional[str]
-    command_line: Optional[str]
-    parent_pid: Optional[int]
-    parent_name: Optional[str]
+    pid: Optional[int] = None
+    name: Optional[str] = None
+    path: Optional[str] = None
+    command_line: Optional[str] = None
+    parent_pid: Optional[int] = None
+    parent_name: Optional[str] = None
 
 class File(BaseModel):
-    name: Optional[str]
-    path: Optional[str]
-    size: Optional[int]
-    mime_type: Optional[str]
+    name: Optional[str] = None
+    path: Optional[str] = None
+    size: Optional[int] = None
+    mime_type: Optional[str] = None
 
 class HashBundle(BaseModel):
     md5: list[str] = []
@@ -946,49 +956,50 @@ class Observables(BaseModel):
 class CortexResult(BaseModel):
     observable: str
     type: str
-    verdict: str                       # malicious | suspicious | safe | unknown
-    score: float
+    verdict: str
+    score: int                          # not float
     details: str
-    analyzer: str
-    raw: dict = {}
+    analyzer: Optional[str] = None      # not required
+    raw: dict[str, Any] = {}
 
 class CanonicalAlert(BaseModel):
     alert_id: str
-    timestamp: str
+    timestamp: datetime                 # not str — a real datetime
     source_engine: str
-    investigation_profile: str         # network_threat | endpoint_behavior |
-                                       # malicious_file | network_anomaly |
-                                       # log_anomaly | generic
+    investigation_profile: str          # network_threat | endpoint_behavior |
+                                        # malicious_file | network_anomaly |
+                                        # log_anomaly | generic
     rule: Rule
-    host: Host
-    user: User = User()
-    network: Optional[Network]
-    process: Optional[Process]
-    file: Optional[File]
+    host: Optional[Host] = None         # Optional — alert_builder.py can't
+    user: Optional[User] = None         # always determine these deterministically;
+    network: Optional[Network] = None   # Agent 1 fills gaps (host/user still a
+    process: Optional[Process] = None   # known gap as of this writing — §6 sub-task 2,
+    file: Optional[File] = None         # accepted, see CHANGES.md)
     observables: Observables = Observables()
-    cortex_results: list[CortexResult] = []    # pre-populated from TheHive fetch
-    thehive_alert_id: str
-    thehive_observable_ids: list[str] = []
-    asset_context: dict = {}
+    cortex_results: list[CortexResult] = []   # pre-populated from TheHive fetch
+    asset_context: dict[str, Any] = {}
+    thehive_alert_id: str = ""
+    thehive_observable_ids: dict[str, Any] = {}   # a dict (data -> observable id), not a list
 ```
 
 ### Correlation models
 
-```python
-class ExistingCaseContext(BaseModel):
-    case_id: str
-    title: str
-    severity: str                      # low | medium | high | critical
-    summary: str = ""
+No `ExistingCaseContext` model — `CorrelationResult.existing_case_context` is
+a plain `dict`, and always has been in the actual code (§18 bug 2 confirmed
+not applicable in the very first read of this codebase). Documenting it as a
+typed model here was aspirational and never matched reality.
 
+```python
 class CorrelationResult(BaseModel):
-    action: str                        # new | merge | deduplicated
-    mode: str                          # new | merge
-    reason: str                        # no_match | entity_match |
-                                       # kill_chain_progression | exact_duplicate
-    confidence: str = "high"           # high | medium | low
-    existing_case_context: Optional[ExistingCaseContext] = None
-    deduplicated: bool = False         # DEPRECATED — use action == "deduplicated"
+    action: str = "new"                 # new | merge | deduplicated
+    mode: str = "new"                   # new | merge
+    merge_into_case: Optional[str] = None    # target case_id when action=merge —
+                                              # format_output.py and case_action.py
+                                              # both depend on this field
+    existing_case_context: Optional[dict[str, Any]] = None
+    reason: str = ""
+    confidence: str = "medium"          # high | medium | low
+    # No `deduplicated` bool field — action == "deduplicated" is the only signal.
 ```
 
 ### Agent output models
@@ -996,17 +1007,16 @@ class CorrelationResult(BaseModel):
 ```python
 class InvestigationTraceEntry(BaseModel):
     tool: str
-    params: dict
-    result_summary: str
-
-ToolCallLogEntry = InvestigationTraceEntry   # alias for backward compat
+    params: dict[str, Any] = {}
+    result_summary: str = ""
+# No ToolCallLogEntry alias — every node imports InvestigationTraceEntry directly.
 
 class EvidencePackage(BaseModel):
-    rule_context: dict = {}
-    asset_context: dict = {}
-    threat_intel: list[dict] = []
-    temporal_context: dict = {}
-    historical_context: dict = {}
+    rule_context: dict[str, Any] = {}
+    asset_context: dict[str, Any] = {}
+    threat_intel: list[CortexResult] = []   # typed, not list[dict]
+    temporal_context: dict[str, Any] = {}
+    historical_context: dict[str, Any] = {}
     investigation_gaps: list[str] = []
     investigation_trace: list[InvestigationTraceEntry] = []
 
@@ -1014,9 +1024,9 @@ class DeltaEvidence(BaseModel):
     new_iocs: list[str] = []
     new_hosts: list[str] = []
     new_users: list[str] = []
-    new_kill_chain_stages: list[dict] = []
-    changed_ti_verdicts: list[dict] = []
-    additional_context: dict = {}
+    new_kill_chain_stages: list[str] = []   # list[str], not list[dict]
+    changed_ti_verdicts: list[dict[str, Any]] = []
+    additional_context: dict[str, Any] = {}
     investigation_gaps: list[str] = []
     investigation_trace: list[InvestigationTraceEntry] = []
 
@@ -1024,43 +1034,25 @@ class MitreMapping(BaseModel):
     tactic: str
     technique: str
     sub_technique: Optional[str] = None
-    confidence: str                    # high | medium | low
-    basis: str                         # evidence citation
+    confidence: str = "low"
+    basis: str = ""
 
 class TriageVerdict(BaseModel):
-    likelihood: str                    # unlikely | possible | likely | near_certain
-    impact_if_true: str                # minor | moderate | severe | critical
-    verdict: str                       # true_positive | false_positive | needs_review
+    likelihood: str                     # unlikely | possible | likely | near_certain
+    impact_if_true: str                 # minor | moderate | severe | critical
+    verdict: str                        # true_positive | false_positive | needs_review
     mitre_mapping: list[MitreMapping] = []
-    reasoning: str
-    recommended_action: str            # create_case | close_fp | needs_review
-    summary: str
+    reasoning: str = ""
+    recommended_action: str = "needs_review"
+    summary: str = ""
 
 class DeltaVerdict(BaseModel):
     severity_change: str = "no_change"
-    new_mitre_stages: list[dict] = []
+    new_mitre_stages: list[dict[str, str]] = []
     scope_change: str = "no_change"
-    urgency: str = "routine_merge"     # escalate | routine_merge
+    urgency: str = "routine_merge"      # escalate | routine_merge
     recommended_action: str = "merge_quiet"
     reasoning: str = ""
-```
-
-### Perception result (Agent 1 output)
-
-```python
-class PerceptionResult(BaseModel):
-    canonical_alert: CanonicalAlert
-    mitre_mapping: list[MitreMapping]
-    correlation_result: CorrelationResult
-```
-
-### Type aliases
-
-```python
-from typing import Literal
-Likelihood = Literal["unlikely", "possible", "likely", "near_certain"]
-Impact     = Literal["minor", "moderate", "severe", "critical"]
-Severity   = Literal["low", "medium", "high", "critical"]
 ```
 
 ### Final output model
@@ -1068,32 +1060,44 @@ Severity   = Literal["low", "medium", "high", "critical"]
 ```python
 class TriageResult(BaseModel):
     alert_id: str
-    action: str                        # create_case | close_fp | needs_review |
-                                       # merge_quiet | merge_and_retier | deduplicated
+    action: str                         # create_case | close_fp | needs_review |
+                                        # merge_quiet | merge_and_retier | deduplicated
     verdict: Optional[str] = None
     severity: Optional[str] = None
     likelihood: Optional[str] = None
     impact_if_true: Optional[str] = None
-    mitre_mapping: list[dict] = []
+    mitre_mapping: list[MitreMapping] = []   # typed, not list[dict]
     reasoning: str = ""
     summary: str = ""
     merge_into_case: Optional[str] = None
     severity_change: Optional[str] = None
     urgency: Optional[str] = None
-    evidence_package: dict = {}
-    investigation_trace: list[InvestigationTraceEntry] = []
-    correlation_result: Optional[dict] = None
+    evidence_package: dict[str, Any] = {}
+    investigation_trace: list[dict[str, Any]] = []   # dicts here (format_output.py
+                                                       # calls .model_dump() before
+                                                       # assigning), not typed entries
+    correlation_result: Optional[dict[str, Any]] = None
 ```
 
 ### LangGraph state
 
+Flat, not nested — Agent 1's output (`nodes/perceive.py`) is written directly
+into `mitre_mapping`/`correlation_result` as separate top-level keys. There is
+no `PerceptionResult`-shaped bundle in the actual state. `total=False` means
+every key is optional at the TypedDict level (nodes use `.get()` throughout).
+
 ```python
-class TriageState(TypedDict):
-    canonical_alert: CanonicalAlert
-    mode: str                          # new | merge
-    perception_result: Optional[PerceptionResult]
+class TriageState(TypedDict, total=False):
+    # Webhook path input (n8n's slim AlertWebhookPayload) — consumed by perceive().
+    raw_alert: Optional[dict[str, Any]]
+    asset_context: Optional[dict[str, Any]]
+    thehive_alert_id: Optional[str]
+
+    canonical_alert: Optional[CanonicalAlert]
+    mitre_mapping: list[MitreMapping]
+    mode: str                           # new | merge
     correlation_result: Optional[CorrelationResult]
-    existing_case_context: Optional[ExistingCaseContext]
+    existing_case_context: Optional[dict[str, Any]]
     evidence_package: Optional[EvidencePackage]
     delta_evidence: Optional[DeltaEvidence]
     triage_verdict: Optional[TriageVerdict]

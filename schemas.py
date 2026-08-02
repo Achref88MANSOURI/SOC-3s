@@ -165,12 +165,6 @@ class CorrelationResult(BaseModel):
     confidence: str = "medium"
 
 
-class PerceptionResult(BaseModel):
-    canonical_alert: CanonicalAlert
-    mitre_mapping: list[MitreMapping] = Field(default_factory=list)
-    correlation_result: CorrelationResult = Field(default_factory=CorrelationResult)
-
-
 class TriageResult(BaseModel):
     alert_id: str
     action: str
