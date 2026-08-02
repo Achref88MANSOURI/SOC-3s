@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from schemas import (
+    AlertWebhookPayload,
     CanonicalAlert,
     CorrelationResult,
     DeltaEvidence,
@@ -166,3 +167,20 @@ def test_investigation_trace_entry():
     assert entry.tool == "cortex_analyze"
     assert entry.params["value"] == "8.8.8.8"
     assert entry.result_summary == ""
+
+
+def test_alert_webhook_payload_minimal():
+    payload = AlertWebhookPayload(thehive_alert_id="~123", raw_alert={"title": "test"})
+    assert payload.thehive_alert_id == "~123"
+    assert payload.raw_alert["title"] == "test"
+    assert payload.asset_context == {}
+
+
+def test_alert_webhook_payload_full():
+    payload = AlertWebhookPayload(
+        thehive_alert_id="~15401056",
+        raw_alert={"title": "Execution Of Non-Existing File", "observables": [{"dataType": "ip", "data": "evil.example"}]},
+        asset_context={"organization_name": "TrustShield", "business_criticity": "high"},
+    )
+    assert payload.raw_alert["observables"][0]["data"] == "evil.example"
+    assert payload.asset_context["business_criticity"] == "high"

@@ -84,6 +84,22 @@ def qdrant_retrieve(collection: str, query_text: str, top_k: int = 5) -> list:
     return []
 
 
+@tool
+def qdrant_retrieve_mitre(query_text: str, top_k: int = 5) -> list:
+    """Search Qdrant for candidate MITRE ATT&CK techniques matching a description
+    of the alert's behavior (rule name, description, command line, etc). Use this
+    when no explicit attack.txxxx tags are available from sigma_rule_lookup."""
+    return retrieve_mitre(query_text, top_k)
+
+
+@tool
+def thehive_open_cases(observables: str = "", host: str = "", user: str = "") -> list:
+    """Search TheHive for open/in-progress cases sharing an observable, host, or
+    user with this alert. observables is a comma-separated list of IPs/domains/hashes."""
+    obs_list = [s.strip() for s in observables.split(",") if s.strip()] if observables else []
+    return search_open_cases(observables=obs_list or None, host=host or None, user=user or None)
+
+
 TOOLS = [
     cortex_analyze,
     itop_asset_lookup,
@@ -91,4 +107,10 @@ TOOLS = [
     thehive_search,
     sigma_rule_lookup,
     qdrant_retrieve,
+]
+
+PERCEPTION_TOOLS = [
+    sigma_rule_lookup,
+    qdrant_retrieve_mitre,
+    thehive_open_cases,
 ]

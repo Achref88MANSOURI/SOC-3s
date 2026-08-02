@@ -48,6 +48,8 @@ class Settings:
     llm_api_key: str = field(default_factory=lambda: os.environ.get("LLM_API_KEY", ""))
 
     qdrant_url: str = field(default_factory=lambda: os.environ.get("QDRANT_URL", "http://localhost:6333"))
+    qdrant_collection: str = field(default_factory=lambda: os.environ.get("QDRANT_COLLECTION", "triage_kb"))
+    qdrant_embedding_model: str = field(default_factory=lambda: os.environ.get("QDRANT_EMBEDDING_MODEL", "BAAI/bge-m3"))
 
     redis_url: str | None = field(default_factory=lambda: os.environ.get("REDIS_URL") or None)
 
@@ -79,6 +81,8 @@ LLM_MODEL: str = settings.llm_model
 LLM_API_KEY: str = settings.llm_api_key
 
 QDRANT_URL: str = settings.qdrant_url
+QDRANT_COLLECTION: str = settings.qdrant_collection
+QDRANT_EMBEDDING_MODEL: str = settings.qdrant_embedding_model
 
 REDIS_URL: str | None = settings.redis_url
 
@@ -122,6 +126,8 @@ if __name__ == "__main__":
 
     print("Qdrant")
     print(f"  QDRANT_URL           = {QDRANT_URL}")
+    print(f"  QDRANT_COLLECTION    = {QDRANT_COLLECTION}")
+    print(f"  QDRANT_EMBEDDING_MODEL = {QDRANT_EMBEDDING_MODEL}")
 
     print("Redis")
     print(f"  REDIS_URL            = {REDIS_URL if REDIS_URL else '(not set — Redis disabled)'}")

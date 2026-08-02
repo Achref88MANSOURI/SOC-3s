@@ -142,6 +142,41 @@ def search_closed_cases(
         return []
 
 
+def get_full_alert_with_analysis(alert_id: str) -> dict | None:
+    """Fetch an alert plus its observables, with each observable's Cortex analyzer
+    reports attached via TheHive's extraData mechanism (reports are excluded by
+    default since TheHive 5.0 and must be requested explicitly).
+
+    Two calls, not one: TheHive's v1 query API rejected an object-keyed multi-query
+    (`{"query": {"alert": [...], "observables": [...]}}`) with
+    "error.expected.jsarray" against the live 5.6.1 instance this was verified
+    against, so alert metadata and observables are fetched as separate array-form
+    queries and merged here.
+    """
+    try:
+        alert_resp = _thehive_post("/v1/query", {"query": [{"_name": "getAlert", "idOrName": alert_id}]})
+    except requests.exceptions.RequestException:
+        return None
+
+    if not isinstance(alert_resp, list) or not alert_resp:
+        return None
+    alert = alert_resp[0]
+
+    try:
+        obs_resp = _thehive_post(
+            "/v1/query",
+            {
+                "query": [{"_name": "getAlert", "idOrName": alert_id}, {"_name": "observables"}],
+                "extraData": ["reports"],
+            },
+        )
+        alert["observables"] = obs_resp if isinstance(obs_resp, list) else []
+    except requests.exceptions.RequestException:
+        alert["observables"] = []
+
+    return alert
+
+
 def get_case_full(case_id: str) -> dict | None:
     try:
         case = _thehive_get(f"/v1/case/{case_id}")
