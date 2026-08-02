@@ -109,10 +109,21 @@ implemented against TheHive 5's documented v1 REST API shape, but — unlike
 `get_full_alert_with_analysis()` — have not been verified against the live
 5.6.1 instance from this environment (no live TheHive reachable here, and this
 code isn't wired into anything that would exercise it against production).
-Confirm the exact endpoint paths and accepted `status` enum values (particularly
-whether `"FP"` is a valid alert status string on this instance, vs. e.g.
-`"Ignored"`) against the live Swagger UI before wiring this into a real
-approval flow.
+Confirm the exact endpoint paths against the live Swagger UI before wiring
+this into a real approval flow. **Update:** the alert `status` enum question
+specifically was resolved the same session — see below.
+
+### Follow-up fix: close_fp uses "Ignored", not "FP"
+
+User verified against the live TheHive 5.6.1 instance's UI: no custom alert
+statuses are configured, only the built-in `New`/`Updated`/`Ignored`/`Imported`.
+`"FP"` is not a valid value. Fixed `nodes/case_action.py::_close_fp()` to pass
+`"Ignored"` (TheHive's built-in status for false positive / not actionable
+alerts) with a comment explaining why, and updated
+`test_close_fp_updates_status_and_comments` in `tests/test_case_action.py` to
+assert `"Ignored"`. One-line fix + one test assertion, as scoped. Also updated
+`SOC-3s-ARCHITECTURE-v2.md` (§2 pipeline diagram, §10 action routing table,
+§19 Phase 8 entry) to say `"Ignored"` instead of `"FP"` throughout.
 
 ## Files created
 | File | Purpose | Phase |
@@ -158,6 +169,7 @@ None — no new external services were wired up this session.
 | Proceed to Phase 6 | Yes — Agent 3 two-pass MITRE validation. User specified the exact scope: nodes/analyze.py passes perception_result.mitre_mapping to Agent 3, prompts/analyst.py instructs validation against evidence, TriageVerdict.mitre_mapping must reflect Agent 3's validated mapping not a blind pass-through, targeted change only | 6 |
 | Proceed to Phase 7 | Yes — format_output.py fixes + end-to-end test. User specified: verify (not assume) the deduplicated check and §18 bug 5 status against current code first, report findings, then fix only what's actually broken; e2e test must mock all external calls (TheHive, LLM, Qdrant, ES, iTop, Cortex) | 7 |
 | Proceed to Phase 8 | Yes — case action stub. User specified the exact signature, the four action branches and what each must do, direct REST not TheHive MCP (citing Decision 5), that it's a stub not wired into the graph, and to read tools/thehive.py first before adding anything | 8 |
+| Is "FP" a valid TheHive 5.6.1 alert status? | No — user verified against the live UI: no custom statuses configured, only built-in New/Updated/Ignored/Imported. close_fp must use "Ignored". | 8 (follow-up) |
 
 ## Questions pending user response
 | Question | Why needed | Blocking phase |
@@ -176,7 +188,7 @@ None — no new external services were wired up this session.
 - [ ] `test_perceive.py`'s LLM-path tests mock `create_react_agent` entirely (no real model call) — same limitation `investigate.py`/`analyze.py` already had (no LLM-in-the-loop test coverage exists anywhere in this suite). Real behavior against qwen3:30b-a3b hasn't been verified.
 - [x] ~~`mcp` 2.0.0 breaks `langchain-mcp-adapters` 0.3.1~~ — moot: `mcp`/`langchain-mcp-adapters` uninstalled from the environment and removed from `requirements.txt` along with the rest of the cortex-mcp revert.
 - [x] ~~cortex-mcp's `.env` vars not actually present~~ — moot: cortex-mcp integration reverted, those vars are no longer used anywhere in the code.
-- [ ] `nodes/case_action.py`'s TheHive write functions (`promote_alert_to_case`, `update_case`, `add_case_comment`, `update_alert_status`, `add_alert_comment`, `merge_alert_into_case`) are implemented from TheHive 5's documented v1 REST API shape, not verified against the live 5.6.1 instance — this module is a stub, not wired into anything that would exercise it against production. Verify endpoint paths and the accepted alert `status` enum (is `"FP"` actually valid, or should it be `"Ignored"`?) against the live Swagger UI before wiring this into a real approval flow.
+- [ ] `nodes/case_action.py`'s TheHive write functions (`promote_alert_to_case`, `update_case`, `add_case_comment`, `update_alert_status`, `add_alert_comment`, `merge_alert_into_case`) are implemented from TheHive 5's documented v1 REST API shape, not verified against the live 5.6.1 instance — this module is a stub, not wired into anything that would exercise it against production. Verify the exact endpoint paths against the live Swagger UI before wiring this into a real approval flow. (The alert `status` enum question specifically is resolved — `close_fp` correctly uses `"Ignored"`, verified against the live UI.)
 - [ ] `nodes/case_action.py` is not wired into `graph.py`/`main.py` — intentional per Phase 8 scope, but means there's currently no code path that actually calls it outside tests. Wiring it in (behind an approval gate) is future work, not scoped to any phase yet.
 - [x] ~~Whether agent-service runs on the same host as cortex-mcp~~ — resolved: it doesn't (172.20.24.224 vs 172.20.24.221), which is exactly why Phase 4 was reverted.
 
@@ -192,3 +204,4 @@ None — no new external services were wired up this session.
 | 6 | `python3 -m pytest tests/ -q` | 99 | 0 | +3 new tests in `test_analyze.py`. Syntax check and import check also passed manually. |
 | 7 | `python3 -m pytest tests/ -q` | 101 | 0 | +2 new tests in `test_e2e.py` (both passed on first run — no code changes needed this phase). Syntax check and import check also passed manually. |
 | 8 | `python3 -m pytest tests/ -q` | 112 | 0 | +11 new tests in `test_case_action.py`. Syntax check, import check, and `tools.registry.TOOLS` listing (unchanged — still 6 read-only tools) also verified manually. Confirmed via `grep` that `case_action` is not referenced in `graph.py`/`main.py`. |
+| 8 (follow-up) | `python3 -m pytest tests/ -q` | 112 | 0 | "FP" → "Ignored" fix — one line in `nodes/case_action.py`, one assertion in `tests/test_case_action.py`. Same test count, all still green. |

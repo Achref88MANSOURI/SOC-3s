@@ -72,7 +72,7 @@ def test_close_fp_updates_status_and_comments(mock_status, mock_comment):
 
     result = execute_case_action(tr, approved=True)
 
-    mock_status.assert_called_once_with("~alert-1", "FP")
+    mock_status.assert_called_once_with("~alert-1", "Ignored")
     mock_comment.assert_called_once_with("~alert-1", "No TI corroboration")
     assert result == {"status": "ok", "action": "close_fp", "alert_id": "~alert-1"}
 

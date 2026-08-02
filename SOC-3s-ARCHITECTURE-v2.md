@@ -100,7 +100,7 @@ structured triage verdict that n8n uses to drive case management actions in TheH
 │     waits synchronously for TriageResult                         │
 │  7. Switch on triage_result.action:                              │
 │     create_case    → promote alert to case in TheHive            │
-│     close_fp       → update alert status to FP                  │
+│     close_fp       → update alert status to Ignored             │
 │     merge_quiet    → add alert to existing case                  │
 │     merge_and_retier → merge + update severity + notify SOC     │
 │     needs_review   → flag alert for analyst                      │
@@ -709,7 +709,7 @@ def execute_case_action(triage_result: TriageResult, approved: bool) -> dict:
 | TriageResult.action | TheHive operation |
 |--------------------|-------------------|
 | `create_case` | Promote alert → case. Set title/severity/tags from TriageResult. Post investigation summary as case comment. |
-| `close_fp` | Update alert status to "FP". Post reasoning as comment. |
+| `close_fp` | Update alert status to "Ignored" (TheHive 5's built-in status for false positive / not actionable alerts — verified against the live 5.6.1 instance, which has no custom statuses; "FP" is not a valid value). Post reasoning as comment. |
 | `merge_quiet` | Merge alert into `merge_into_case`. Post delta summary as comment. |
 | `merge_and_retier` | Merge + update case severity + flag for urgent SOC notification. |
 
@@ -1535,10 +1535,14 @@ PHASE 8 — Case action stub (DONE — not wired into graph.py, as intended)
     MCP — consistent with Decision 5 and the tools/thehive.py precedent set in
     Phase 2. New write functions added: promote_alert_to_case, update_case,
     add_case_comment, update_alert_status, add_alert_comment,
-    merge_alert_into_case. UNVERIFIED against the live TheHive 5.6.1 instance
-    (unlike get_full_alert_with_analysis) — endpoint paths follow TheHive 5's
-    documented v1 REST API shape; confirm against the live Swagger UI before
-    this is ever wired into a real approval flow.
+    merge_alert_into_case. Endpoint paths follow TheHive 5's documented v1 REST
+    API shape and are UNVERIFIED against the live instance (unlike
+    get_full_alert_with_analysis) — confirm against the live Swagger UI before
+    this is ever wired into a real approval flow. One specific value IS
+    verified: close_fp sets the alert status to "Ignored", not "FP" — checked
+    against the live 5.6.1 instance's UI, which has no custom statuses
+    configured (only the built-in New, Updated, Ignored, Imported; "FP" is not
+    a valid value).
   Not added to tools/registry.py's TOOLS — these are write operations, never
     exposed to the LLM agents, preserving "all agent tools are read-only"
   Test: tests/test_case_action.py (11 tests) — approved=False raises before any

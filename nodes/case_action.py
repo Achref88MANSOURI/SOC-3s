@@ -72,7 +72,10 @@ def _create_case(triage_result: TriageResult) -> dict:
 
 def _close_fp(triage_result: TriageResult) -> dict:
     alert_id = triage_result.alert_id
-    update_alert_status(alert_id, "FP")
+    # "Ignored" is TheHive 5's built-in status for false positive / not
+    # actionable alerts — verified against the live 5.6.1 instance's UI, which
+    # has no custom statuses configured (only New, Updated, Ignored, Imported).
+    update_alert_status(alert_id, "Ignored")
     add_alert_comment(alert_id, triage_result.reasoning or triage_result.summary)
 
     return {"status": "ok", "action": "close_fp", "alert_id": alert_id}
