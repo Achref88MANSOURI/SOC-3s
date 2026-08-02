@@ -437,8 +437,16 @@ Agent 1's sub-tasks are mostly sequential with light tool use. A **short ReAct l
 3. `thehive_search(mode="open", ...)` — entity match
 4. `qdrant_retrieve("mitre", ...)` — kill-chain context (only if merge candidate found)
 
-The LLM produces structured JSON output after the loop using the `PerceptionResult`
-schema.
+### Output schema
+
+The LLM produces structured JSON output after the loop matching
+`{mitre_mapping: [...], correlation_result: {...}}` (see `prompts/perceiver.py`
+for the exact schema in the system prompt). `nodes/perceive.py` writes this
+directly into `TriageState`'s flat `mitre_mapping` and `correlation_result`
+fields — there is no bundled output object. `canonical_alert` is not
+re-emitted by Agent 1; it stays as `alert_builder.py` built it. (As implemented,
+`perceive()` does not perform sub-task 2's full LLM-driven `CanonicalAlert`
+re-normalization — see `CHANGES.md` for this known, accepted gap.)
 
 ---
 
@@ -456,7 +464,9 @@ findings. Mark gaps explicitly — never fill missing evidence with assumptions.
 ### Mode A — New alert
 
 ```
-INPUT:  CanonicalAlert + PerceptionResult (Agent 1 output)
+INPUT:  CanonicalAlert (from TriageState — nodes/investigate.py reads
+        state["canonical_alert"] directly; it does not read Agent 1's
+        mitre_mapping or correlation_result)
 BUDGET: max 8 tool calls
 OUTPUT: EvidencePackage (structured JSON)
 FOCUS:  build complete picture from scratch
@@ -484,7 +494,9 @@ investigation_trace: tool call log (tool, params, result_summary)
 ### Mode B — Merge candidate
 
 ```
-INPUT:  CanonicalAlert + PerceptionResult + existing_case_context
+INPUT:  CanonicalAlert + existing_case_context (state["existing_case_context"],
+        a plain dict — set by nodes/perceive.py when correlation_result.action
+        is "merge")
 BUDGET: max 5 tool calls
 OUTPUT: DeltaEvidence (structured JSON)
 FOCUS:  what does this NEW alert add to the existing case?
@@ -882,9 +894,12 @@ documented as if real: `TriageRequest` (legacy model, never added),
 models below), `ToolCallLogEntry` (no alias exists; code uses
 `InvestigationTraceEntry` directly everywhere), and the `Impact`/
 `Likelihood`/`Severity` `Literal` type aliases (§18 bug 5 — never added,
-nothing imports them). `PerceptionResult` was also removed from both the doc
-and `schemas.py` itself in this same cleanup — it was defined but never
-referenced anywhere in the codebase (Agent 1's output is threaded through
+nothing imports them). The model that used to bundle Agent 1's output
+(`canonical_alert` + `mitre_mapping` + `correlation_result` into one object)
+was also removed from both the doc and `schemas.py` itself in this same
+cleanup, and swept from the rest of the doc (§6, §7, §15, §19) in a follow-up
+pass — it was defined but never referenced anywhere in the codebase (Agent 1's
+output is threaded through
 `TriageState`'s flat `mitre_mapping`/`correlation_result` fields instead, not
 a bundled object).
 
@@ -1083,8 +1098,9 @@ class TriageResult(BaseModel):
 
 Flat, not nested — Agent 1's output (`nodes/perceive.py`) is written directly
 into `mitre_mapping`/`correlation_result` as separate top-level keys. There is
-no `PerceptionResult`-shaped bundle in the actual state. `total=False` means
-every key is optional at the TypedDict level (nodes use `.get()` throughout).
+no bundled Agent-1-output object anywhere in the actual state. `total=False`
+means every key is optional at the TypedDict level (nodes use `.get()`
+throughout).
 
 ```python
 class TriageState(TypedDict, total=False):
@@ -1223,7 +1239,7 @@ agent-service/
 │
 ├── schemas.py
 │     All Pydantic models (see §12)
-│     AlertWebhookPayload (new), PerceptionResult (new)
+│     AlertWebhookPayload (new)
 │     TriageRequest (legacy, keep for tests)
 │     ExistingCaseContext, CorrelationResult
 │     CanonicalAlert and sub-models
@@ -1280,7 +1296,7 @@ agent-service/
 │   ├── __init__.py
 │   ├── perceiver.py              ← NEW, replaces investigator.py for Agent 1
 │   │     build_prompt(mode) → Agent 1 system prompt
-│   │     Output schema: PerceptionResult JSON
+│   │     Output schema: {mitre_mapping, correlation_result} JSON
 │   │
 │   ├── investigator.py           ← EXISTS, update output schema
 │   │     Add EvidencePackage / DeltaEvidence JSON schema to prompt
@@ -1455,8 +1471,9 @@ PHASE 3 — Agent 1 (perceive.py)
   Rename nodes/correlate.py → nodes/perceive.py
   Keep gate0_dedup() as pure Python Redis check
   Build perceive() LLM agent (6 sub-tasks)
-  Create prompts/perceiver.py with PerceptionResult output schema
-  Add PerceptionResult to schemas.py
+  Create prompts/perceiver.py with {mitre_mapping, correlation_result} output
+    schema — written directly into TriageState's flat fields, not a bundled
+    output object
   Update graph.py: replace correlate node with gate0 + perceive nodes
   Test: 10 real alerts, check CanonicalAlert quality + MITRE mapping accuracy
 

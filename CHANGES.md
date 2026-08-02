@@ -325,7 +325,7 @@ None — no new external services were wired up this session.
 - [ ] **Partial test coverage:** `tools/thehive.py` — only `get_full_alert_with_analysis` is directly tested; `search_open_cases`, `search_closed_cases`, `get_case_full`, and all 6 Phase 8 write functions have no direct test (the write functions are only exercised indirectly, via mocks, by `test_case_action.py`).
 - [x] ~~`SOC-3s-ARCHITECTURE-v2.md` §12 (Schemas) has drifted significantly from `schemas.py`~~ — **fixed in the post-Phase-10 cleanup commit** (see below): §12 rewritten field-for-field against the actual `schemas.py`, and `PerceptionResult` (confirmed dead — referenced nowhere outside its own definition) removed from `schemas.py` itself, not just documented as gone.
 - [ ] **`SOC-3s-ARCHITECTURE-v2.md` §15 (File Tree) is stale throughout** — never updated as phases completed, unlike §19. Don't use it as a source of truth for what's done; use §19 instead.
-- [ ] **`PerceptionResult` is still referenced in §6, §7, §15, and §19** (lines describing Agent 1/2's I/O contracts and historical build-order entries) even though it no longer exists in `schemas.py` as of the post-Phase-10 cleanup below. Only §12 was in scope for that cleanup commit (explicit instruction); these other mentions are now stale in the same way §12 was, but weren't touched. Worth a follow-up pass if/when §6/§7 get revisited.
+- [x] ~~`PerceptionResult` is still referenced in §6, §7, §15, and §19~~ — **swept in the "doc cleanup — PerceptionResult sweep" commit** below. `grep -rn "PerceptionResult" SOC-3s-ARCHITECTURE-v2.md` now returns zero hits (including the two explanatory sentences in §12 itself, which were rephrased to not need the literal name, per the user's literal "confirm zero hits" done-condition — not just left as accurate-but-matching text).
 
 ## Test results
 | Phase | Tests run | Pass | Fail | Notes |
@@ -470,3 +470,83 @@ above in Known Issues as a residual, not silently dropped.
 
 112/112 tests still passing after the `schemas.py` change (`PerceptionResult`
 being dead code, its removal has zero behavioral effect).
+
+## Doc cleanup — PerceptionResult sweep
+
+Documentation only, no `.py` file changes. Single focused commit, done before
+connecting to live n8n.
+
+Swept every remaining `PerceptionResult` reference out of
+`SOC-3s-ARCHITECTURE-v2.md`:
+- **§6 (Agent 1):** the "Implementation note" ending was turned into a proper
+  "Output schema" sub-section describing the real contract —
+  `{mitre_mapping, correlation_result}` JSON, written directly into
+  `TriageState`'s flat fields by `nodes/perceive.py`, with `canonical_alert`
+  left as `alert_builder.py` built it (and a pointer to the known sub-task-2
+  re-normalization gap already tracked elsewhere in this log).
+- **§7 (Agent 2):** both `INPUT:` lines corrected. Verified against
+  `nodes/investigate.py` directly (via `grep 'state\.get\|state\['`) rather
+  than assuming — it reads `mode`, `canonical_alert`, and (merge mode only)
+  `existing_case_context`. It does **not** read `mitre_mapping` or
+  `correlation_result` at all, so the fix isn't just a rename — the old text
+  implied Agent 2 consumes Agent 1's MITRE mapping, which it never has.
+- **§15 (File Tree):** removed from the `schemas.py` and `prompts/perceiver.py`
+  entries.
+- **§19 (Build Order):** removed from the Phase 3 entry, replaced with the
+  actual output schema description.
+- **§12:** the two explanatory sentences about the model's removal (written in
+  the prior cleanup commit) were rephrased to not use the literal string
+  either, since the done-condition for this task was a literal zero-hit grep
+  across the file, not "zero *stale* hits."
+
+`grep -rn "PerceptionResult" SOC-3s-ARCHITECTURE-v2.md` → zero hits, confirmed
+before committing, as instructed.
+
+**Not swept, out of scope for this commit:** `CHANGES.md`'s own history
+(this file, describing what was removed and when — expected to name the
+symbol) and `claude-code-session-prompt.md` (the user's original pasted
+session-brief document, containing one incidental mention inside an
+illustrative example table — not something this session authors or
+maintains).
+
+### §15 quick pass — other file tree entries that don't match disk (flagged, not fixed)
+
+Per instruction: found, listed here, **not corrected**.
+
+- `config.py` entry: `Optional:` list still includes `CORTEX_MCP_URL` (removed
+  in the Phase 4 revert) and omits `QDRANT_COLLECTION`/`QDRANT_EMBEDDING_MODEL`
+  (both real settings, added in earlier phases).
+- `schemas.py` entry: still lists `TriageRequest`, `ExistingCaseContext`,
+  `Literal type aliases: Likelihood, Impact, Severity`, and
+  `ToolCallLogEntry = InvestigationTraceEntry (alias)` — all four confirmed
+  not to exist in code back in §12's cleanup, but §15's copy wasn't updated
+  to match.
+- `requirements.txt` entry: still lists `langchain-mcp-adapters` (removed in
+  the Phase 4 revert) and `thehive4py` (never actually used — raw `requests`
+  throughout); doesn't list `sentence-transformers` (the actual Qdrant
+  embedding dependency).
+- `nodes/investigate.py` entry: says "needs structured output fix" — that was
+  already true before Phase 1 even started, not a live TODO.
+- `nodes/format_output.py` entry: lists two "fixes needed" that were already
+  resolved before this session began (§18 bugs 3/4).
+- `prompts/perceiver.py` entry: the comment "replaces investigator.py for
+  Agent 1" is wrong — `investigator.py` still exists and serves Agent 2;
+  `perceiver.py` didn't replace it, it's a new file for a new agent. Also
+  still shows `build_prompt(mode)` — wrong signature, actual is
+  `build_prompt()` with no arguments (a discrepancy already noted back in
+  Phase 3's section of this log, but never corrected in §15 itself).
+- `prompts/analyst.py` entry: "add mitre_mapping validation instruction" —
+  already done, in Phase 6.
+- `tests/` section: doesn't list `test_investigate.py`, `test_case_action.py`,
+  `test_e2e.py`, `test_thehive.py`, or `test_qdrant.py` (all real files);
+  still shows `test_correlate.py ← RETIRE or repurpose` as if a pending
+  decision, when it was actually deleted back in Phase 3.
+
+This reinforces Phase 10's finding: §15 is stale throughout and shouldn't be
+trusted as a source of truth for "what's done" — §19 is (mostly — see the
+Phase 3 gap below).
+
+**One more finding, adjacent but real:** §19's Phase 3 entry was never marked
+`(DONE)` with a details summary the way Phases 4 through 10 were — an
+oversight from earlier in the session. Left as-is this commit (out of the
+explicitly given scope), noted here rather than silently fixed or ignored.
