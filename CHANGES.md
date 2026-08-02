@@ -11,7 +11,7 @@ Last updated: 2026-08-02
 - [x] Phase 7 — Format output fixes + end-to-end (verification only — nothing was broken)
 - [x] Phase 8 — Case action stub
 - [x] Phase 9 — n8n integration notes
-- [ ] Phase 10 — Tests
+- [x] Phase 10 — Test cleanup and final validation
 
 ## Phase 1 — status at session start (no code changes needed)
 
@@ -145,6 +145,114 @@ assert `"Ignored"`. One-line fix + one test assertion, as scoped. Also updated
 `SOC-3s-ARCHITECTURE-v2.md` (§2 pipeline diagram, §10 action routing table,
 §19 Phase 8 entry) to say `"Ignored"` instead of `"FP"` throughout.
 
+## Phase 10 — test coverage audit and final validation
+
+No code changed this phase — audit and documentation only, per explicit
+instruction not to pad the test count with speculative tests.
+
+**112/112 tests passing**, confirmed via `python3 -m pytest tests/ -q`.
+
+### Coverage audit — `nodes/`, `tools/`, `prompts/`
+
+`nodes/` — every module has a dedicated test file: `analyze.py`, `case_action.py`,
+`format_output.py`, `investigate.py`, `perceive.py` all covered.
+
+`tools/` — **zero dedicated test coverage:**
+- `tools/cortex.py` (`analyze_observable`, analyzer selection, taxonomy
+  reduction) — nothing exercises this file directly. It's the sole live Cortex
+  path for Agent 2 as of the Phase 4 revert, and has no test of its own.
+- `tools/elasticsearch.py` (`query_related_alerts`, `query_process_history`,
+  `query_connection_history`) — untested.
+- `tools/itop.py` (`lookup_asset`) — untested.
+- `tools/registry.py` (all `@tool`-wrapped functions: `cortex_analyze`,
+  `itop_asset_lookup`, `elasticsearch_query`, `thehive_search`,
+  `sigma_rule_lookup`, `qdrant_retrieve`, plus the `PERCEPTION_TOOLS` wrappers)
+  — untested. This is the module the ReAct agents actually call; its
+  parameter-parsing logic (e.g. `elasticsearch_query`'s `index_type` dispatch,
+  comma-separated list parsing in `thehive_search`/`thehive_open_cases`) has no
+  test of its own, only indirect coverage via mocked-away ReAct agents
+  elsewhere.
+- `tools/sigma_rules.py` (`get_rule_source`, filesystem walk + YAML parsing) —
+  untested.
+
+`tools/` — **partial coverage:**
+- `tools/thehive.py` — `test_thehive.py` only covers
+  `get_full_alert_with_analysis` (4 tests). `search_open_cases`,
+  `search_closed_cases`, `get_case_full` (pre-existing read functions) and all
+  6 Phase 8 write functions (`promote_alert_to_case`, `update_case`,
+  `add_case_comment`, `update_alert_status`, `add_alert_comment`,
+  `merge_alert_into_case`) have no direct test — the write functions are only
+  exercised indirectly by `test_case_action.py`, which mocks them at the
+  `nodes.case_action` import boundary and therefore never executes their
+  actual HTTP-request-building logic.
+- `tools/qdrant.py` — fully covered (`test_qdrant.py`, 4 tests: all three
+  retrieve functions + exception handling).
+
+`prompts/` — **zero coverage:**
+- `prompts/perceiver.py` — `build_prompt()` has no test at all. `test_prompts.py`
+  only imports from `prompts.investigator` and `prompts.analyst`.
+
+`prompts/` — covered: `prompts/analyst.py`, `prompts/investigator.py` (both via
+`test_prompts.py`).
+
+**Outside the audited directories, for completeness:** `main.py` and `graph.py`
+have no dedicated unit test file but are exercised end-to-end by
+`test_e2e.py`'s 2 `TestClient`-based tests. `config.py` has no test file
+(low-risk — pure env-var loading with defaults). `alert_builder.py` is fully
+covered by `test_alert_builder.py`.
+
+Per the explicit instruction for this phase, none of these gaps were filled —
+they're recorded as known issues below, not closed.
+
+### Architecture doc drift audit
+
+Read `SOC-3s-ARCHITECTURE-v2.md` fresh against the current codebase, focused on
+sections not already touched by earlier phases' corrections (TheHive/Qdrant/
+cortex-mcp/case-action sections were kept in sync as each phase landed — see
+their respective sections above). Found drift in two sections that were never
+revisited after the initial pre-work draft:
+
+1. **§12 (Schemas) has fallen substantially out of sync with `schemas.py`.**
+   Specific mismatches: `TriageRequest` (legacy model) is documented but
+   doesn't exist in code; `Rule.uuid`/`Rule.source_engine` don't match
+   (`uuid` is required not Optional in code, no `source_engine` field on
+   `Rule` — it lives on `CanonicalAlert` instead); `Host.hostname` is
+   `Optional` in code but shown required in the doc; `CortexResult.score` is
+   `int` in code, `float` in the doc; `CanonicalAlert.host`/`.user` are
+   `Optional` in code but shown required; `thehive_observable_ids` is a `dict`
+   in code but a `list[str]` in the doc; **`ExistingCaseContext` doesn't exist
+   in code at all** (this was flagged back in the very first session read —
+   `CorrelationResult.existing_case_context` is a plain `dict`, not a typed
+   model); `CorrelationResult` is missing `merge_into_case` from the doc
+   entirely (a field the real code depends on throughout `format_output.py`)
+   and has no `deduplicated` field in code (the doc marks it "DEPRECATED" as
+   if it still exists); **`ToolCallLogEntry` alias doesn't exist** (§18 bug 6,
+   confirmed not applicable back in the Phase 1 read, but the doc still shows
+   it); `EvidencePackage.threat_intel` is `list[CortexResult]` in code, shown
+   as `list[dict]`; **`Impact`/`Likelihood`/`Severity` Literal aliases don't
+   exist anywhere** (§18 bug 5, confirmed again in Phase 7); **`TriageState`
+   has no `perception_result` field** — the doc shows Agent 1's output bundled
+   into a single `PerceptionResult` object, but the real state shape is flat
+   (`mitre_mapping` and `correlation_result` as separate top-level keys,
+   plus `raw_alert`/`asset_context`/`thehive_alert_id` for the webhook path,
+   none of which are in the doc's `TriageState`). Related: `PerceptionResult`
+   *is* defined in `schemas.py` but is dead code — nothing constructs or
+   references it anywhere; `nodes/perceive.py` writes the flat state fields
+   directly instead.
+2. **§15 (File Tree) reads as the original pre-work TODO list and was never
+   updated as phases completed** — unlike §19 (Build Order), which was updated
+   after every phase in this session. Example: `prompts/perceiver.py`'s entry
+   still says `build_prompt(mode)`, which was already known-inconsistent with
+   Agent 1's actual role and built as `build_prompt()` instead back in Phase 3
+   (see `CHANGES.md`'s Phase 3 section) — §15 was never corrected to match.
+   The `tests/` section similarly doesn't list `test_investigate.py`,
+   `test_case_action.py`, `test_e2e.py`, or the deleted `test_cortex_mcp.py`.
+   **§19 is the current source of truth for phase status; §15 is stale
+   throughout and shouldn't be trusted for "what's done."**
+
+Per the explicit instruction for this phase, `SOC-3s-ARCHITECTURE-v2.md` was
+**not** rewritten to fix these — they're listed here as findings only.
+
 ## Files created
 | File | Purpose | Phase |
 |------|---------|-------|
@@ -213,6 +321,10 @@ None — no new external services were wired up this session.
 - [ ] `nodes/case_action.py`'s TheHive write functions (`promote_alert_to_case`, `update_case`, `add_case_comment`, `update_alert_status`, `add_alert_comment`, `merge_alert_into_case`) are implemented from TheHive 5's documented v1 REST API shape, not verified against the live 5.6.1 instance — this module is a stub, not wired into anything that would exercise it against production. Verify the exact endpoint paths against the live Swagger UI before wiring this into a real approval flow. (The alert `status` enum question specifically is resolved — `close_fp` correctly uses `"Ignored"`, verified against the live UI.)
 - [ ] `nodes/case_action.py` is not wired into `graph.py`/`main.py` — intentional per Phase 8 scope, but means there's currently no code path that actually calls it outside tests. Wiring it in (behind an approval gate) is future work, not scoped to any phase yet.
 - [x] ~~Whether agent-service runs on the same host as cortex-mcp~~ — resolved: it doesn't (172.20.24.224 vs 172.20.24.221), which is exactly why Phase 4 was reverted.
+- [ ] **Zero test coverage:** `tools/cortex.py`, `tools/elasticsearch.py`, `tools/itop.py`, `tools/registry.py`, `tools/sigma_rules.py`, `prompts/perceiver.py`. See Phase 10's coverage audit above for detail. Not filled in this session per explicit instruction not to pad the test count speculatively — flagged here so the gap is visible, not silently accepted.
+- [ ] **Partial test coverage:** `tools/thehive.py` — only `get_full_alert_with_analysis` is directly tested; `search_open_cases`, `search_closed_cases`, `get_case_full`, and all 6 Phase 8 write functions have no direct test (the write functions are only exercised indirectly, via mocks, by `test_case_action.py`).
+- [ ] **`SOC-3s-ARCHITECTURE-v2.md` §12 (Schemas) has drifted significantly from `schemas.py`** — see Phase 10's drift audit above for the full itemized list (missing `merge_into_case` on `CorrelationResult`, nonexistent `ExistingCaseContext`/`ToolCallLogEntry`/`Impact`/`Likelihood`/`Severity`, `TriageState` shape mismatch, dead `PerceptionResult` model, and more). Not fixed this session per explicit instruction to list drift, not rewrite the doc.
+- [ ] **`SOC-3s-ARCHITECTURE-v2.md` §15 (File Tree) is stale throughout** — never updated as phases completed, unlike §19. Don't use it as a source of truth for what's done; use §19 instead.
 
 ## Test results
 | Phase | Tests run | Pass | Fail | Notes |
@@ -228,3 +340,90 @@ None — no new external services were wired up this session.
 | 8 | `python3 -m pytest tests/ -q` | 112 | 0 | +11 new tests in `test_case_action.py`. Syntax check, import check, and `tools.registry.TOOLS` listing (unchanged — still 6 read-only tools) also verified manually. Confirmed via `grep` that `case_action` is not referenced in `graph.py`/`main.py`. |
 | 8 (follow-up) | `python3 -m pytest tests/ -q` | 112 | 0 | "FP" → "Ignored" fix — one line in `nodes/case_action.py`, one assertion in `tests/test_case_action.py`. Same test count, all still green. |
 | 9 | `python3 -m pytest tests/ -q` | 112 | 0 | Documentation-only phase — no code changed, same test count. |
+| 10 | `python3 -m pytest tests/ -q` | 112 | 0 | Audit-only phase — no code or test changed. Also ran `python3 -m pytest tests/ -v --tb=short` for the coverage audit (see Phase 10 section above). |
+
+## Session summary
+
+**11 commits**, spanning the initial Phase 0 read-through through Phase 10's
+audit. **112 tests passing, 0 failing**, up from 71 at session start (net +41;
+the actual gross additions are higher since Phase 4's 14 tests were added then
+removed with the rest of that revert).
+
+### Commits (oldest to newest)
+1. `55dcc5c` — Reconcile TheHive/Qdrant tooling against verified live infra (carried forward a prior session's uncommitted work + doc corrections)
+2. `017dbde` — Phase 2: accept AlertWebhookPayload, add alert_builder.py
+3. `e0661a2` — Phase 3: replace correlate.py with LLM-powered perceive.py (Agent 1)
+4. `f778b79` — Phase 4: cortex-mcp integration into investigate.py
+5. `e7dcf9a` — Revert Phase 4: cortex-mcp is stdio-only, can't cross the agent-service/cortex-mcp VM boundary
+6. `a6392b6` — Phase 5: Agent 2 structured output hardening
+7. `4f9f404` — Phase 6: Agent 3 two-pass MITRE validation
+8. `41c9029` — Phase 7: verify format_output.py + add end-to-end test
+9. `7ee28db` — Phase 8: case action stub (execute_case_action), not wired into graph.py
+10. `3fdcb7a` — Fix close_fp: use TheHive's built-in "Ignored" status, not "FP"
+11. `3342c08` — Phase 9: N8N-INTEGRATION.md migration guide
+
+*(Phase 10 itself produced no commit — audit only, this `CHANGES.md` update is
+the only change and will be committed alongside this report.)*
+
+### New files created (14, net of the Phase 4 build+revert cycle)
+`SOC-3s-ARCHITECTURE-v2.md`, `CHANGES.md`, `N8N-INTEGRATION.md`,
+`claude-code-session-prompt.md`, `alert_builder.py`, `nodes/case_action.py`,
+`prompts/perceiver.py`, `tests/test_alert_builder.py`,
+`tests/test_case_action.py`, `tests/test_e2e.py`, `tests/test_investigate.py`,
+`tests/test_perceive.py`, `tests/test_qdrant.py`, `tests/test_thehive.py`.
+
+*Also created and then fully deleted within the session (Phase 4 build +
+revert, net zero against the starting commit, not in the list above):*
+`tools/cortex_mcp.py`, `tests/test_cortex_mcp.py`.
+
+### Files renamed
+`nodes/correlate.py` → `nodes/perceive.py` (role changed from pure-Python
+correlation to LLM-powered perception + correlation).
+
+### Files modified (14)
+`config.py`, `graph.py`, `main.py`, `nodes/analyze.py`,
+`nodes/investigate.py`, `prompts/analyst.py`, `prompts/investigator.py`,
+`requirements.txt`, `schemas.py`, `tests/test_analyze.py`,
+`tests/test_graph.py`, `tests/test_schemas.py`, `tools/qdrant.py`,
+`tools/registry.py`, `tools/thehive.py`.
+
+### Files deleted
+`CONTEXT.md`, `preview.md`, `summary.md` (superseded by
+`SOC-3s-ARCHITECTURE-v2.md`), `tests/test_correlate.py` (superseded by
+`tests/test_perceive.py`).
+
+### Decisions made, with outcomes
+| # | Decision point | Outcome |
+|---|---|---|
+| 1 | TheHive access: `thehive4py` (doc) vs raw `requests` (code) | Code wins — doc corrected to match the verified-working raw REST implementation |
+| 2 | Qdrant embedding: `fastembed`+`bge-small` (doc) vs `sentence-transformers`+`bge-m3` (code) | Code wins — doc corrected; matches a prior-session empirical finding already in memory |
+| 3 | `LLM_MODEL` — was `llama3.2:3b`, needed `qwen3:30b-a3b` | Confirmed already set correctly in the real `.env`; no code change needed |
+| 4 | `requirements-dev.txt` missing | Deferred by user — still open |
+| 5 | Whether to build `cortex-mcp` integration (Phase 4) | Built in full (3 tools, prompt updates, 14 tests) — see #7 |
+| 6 | `cortex-mcp` source review requirement (architecture Rule 8) | User confirmed clean (auth handling, no logging, graceful failure, no fs writes) — cleared the way for #5 |
+| 7 | `cortex-mcp` deployment topology (stdio transport, different VMs) | **Reverted** — stdio can't cross the agent-service (172.20.24.224) / cortex-mcp (172.20.24.221) VM boundary. Full revert to direct REST via `tools/cortex.py`, same selective-invocation behavior |
+| 8 | `perceive.py` not re-normalizing `CanonicalAlert` fields (§6 sub-task 2) | Accepted as a known gap (Option A) — not implemented, documented instead |
+| 9 | Phase 6 scope (two-pass MITRE validation) | Implemented exactly as scoped — `analyze.py` passes Agent 1's mapping, `analyst.py` instructs validation, `TriageVerdict.mitre_mapping` proven (via test) to be Agent 3's own output, not a pass-through |
+| 10 | Phase 7 approach (verify-first, not rewrite) | Both suspected bugs turned out to already be non-issues; zero code changes, added the e2e test instead |
+| 11 | Phase 8 case-action scope and boundaries | Implemented exactly as scoped — stub built, explicitly not wired into `graph.py`/`main.py`, not exposed to the LLM agents via `tools/registry.py` |
+| 12 | TheHive alert status for `close_fp`: `"FP"` vs `"Ignored"` | User verified against the live 5.6.1 UI — `"FP"` is invalid, `"Ignored"` is TheHive's built-in status for this. One-line fix applied |
+| 13 | Phase 9 scope (n8n isn't in this repo) | Documentation only — `N8N-INTEGRATION.md` written, no live n8n instance touched or reachable |
+| 14 | Phase 10 scope (audit, not padding) | No new tests added speculatively; coverage and doc-drift gaps reported honestly as known issues instead |
+
+### What's still open (see "Known issues / TODOs" above for full detail)
+- `requirements-dev.txt` doesn't exist yet (deferred)
+- Zero test coverage: `tools/cortex.py`, `tools/elasticsearch.py`, `tools/itop.py`, `tools/registry.py`, `tools/sigma_rules.py`, `prompts/perceiver.py`
+- Partial coverage: `tools/thehive.py` (only the read path used by `perceive.py` is directly tested)
+- `SOC-3s-ARCHITECTURE-v2.md` §12 (Schemas) and §15 (File Tree) have drifted from the actual code — itemized in Phase 10's drift audit above
+- `nodes/case_action.py`'s TheHive write functions are unverified against the live instance (beyond the now-confirmed `"Ignored"` status value)
+- ES firewall rule and `SIGMA_RULES_PATH` mount status for live deployment — never confirmed this session, not blocking any code phase
+- `perceive.py`'s CanonicalAlert re-normalization gap (§6 sub-task 2) — accepted, not scheduled
+
+### Ready for Tier 0 (advisory-only validation against real Security Onion alerts)
+Per `SOC-3s-ARCHITECTURE-v2.md` §19 Phase 11: every verdict should annotate the
+case without the pipeline auto-acting, analysts review all `TriageResult`s, and
+agreement rate (Cohen's κ) gets tracked before considering Tier 1. That's a live
+deployment activity outside this session's scope — the code is now in a state
+where that trial can start, contingent on the live-verification items above
+(TheHive write endpoints, ES firewall, Sigma rules path) actually being checked
+against the real environment first.
