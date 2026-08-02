@@ -41,6 +41,18 @@ def investigate(state: TriageState) -> TriageState:
 
     alert_data = alert.model_dump() if hasattr(alert, "model_dump") else str(alert)
     human_parts = [f"Investigate this alert:\n{json.dumps(alert_data, indent=2, default=str)}"]
+
+    existing_cortex_results = getattr(alert, "cortex_results", None) or []
+    if existing_cortex_results:
+        existing_dump = [
+            r.model_dump() if hasattr(r, "model_dump") else r for r in existing_cortex_results
+        ]
+        human_parts.append(
+            "\n\nExisting Cortex results already fetched from TheHive for this alert "
+            "(do NOT call cortex_analyze on these observables again — only on ones "
+            f"NOT in this list):\n{json.dumps(existing_dump, indent=2, default=str)}"
+        )
+
     if mode == "merge" and state.get("existing_case_context"):
         human_parts.append(
             f"\n\nExisting case context:\n{json.dumps(state['existing_case_context'], indent=2, default=str)}"
@@ -53,7 +65,7 @@ def investigate(state: TriageState) -> TriageState:
         )
     except Exception as e:
         logger.error("ReAct agent failed: %s", str(e))
-        return _fallback_state(state, mode, str(e))
+        return _fallback_state(state, mode, str(e), existing_cortex_results)
 
     messages = result.get("messages", [])
     trace = _extract_trace(messages)
@@ -68,10 +80,14 @@ def investigate(state: TriageState) -> TriageState:
         evidence_data = _build_from_tool_results(messages, trace)
 
     if mode == "new":
+        threat_intel = _merge_cortex_results(
+            _to_cortex_results(evidence_data.get("threat_intel", [])),
+            existing_cortex_results,
+        )
         state["evidence_package"] = EvidencePackage(
             rule_context=evidence_data.get("rule_context", {}),
             asset_context=evidence_data.get("asset_context", {}),
-            threat_intel=_to_cortex_results(evidence_data.get("threat_intel", [])),
+            threat_intel=threat_intel,
             temporal_context=evidence_data.get("temporal_context", {}),
             historical_context=evidence_data.get("historical_context", {}),
             investigation_gaps=evidence_data.get("investigation_gaps", []),
@@ -163,10 +179,11 @@ def _build_from_tool_results(messages: list, trace: list[InvestigationTraceEntry
     return data
 
 
-def _gap_msg(final_text: str) -> str:
-    if not final_text:
-        return "Agent produced no final output"
-    return "Agent output was not valid structured JSON — gaps may exist"
+def _coerce_score(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _to_cortex_results(items: list) -> list:
@@ -178,15 +195,29 @@ def _to_cortex_results(items: list) -> list:
                 results.append(CortexResult(**item))
             except Exception:
                 results.append(CortexResult(
-                    observable=item.get("observable", "unknown"),
-                    type=item.get("type", "unknown"),
-                    verdict=item.get("verdict", "unknown"),
-                    score=item.get("score", 0),
+                    observable=str(item.get("observable", "unknown")),
+                    type=str(item.get("type", "unknown")),
+                    verdict=str(item.get("verdict", "unknown")),
+                    score=_coerce_score(item.get("score", 0)),
                     details=str(item),
                 ))
         elif hasattr(item, "model_dump"):
             results.append(item)
     return results
+
+
+def _merge_cortex_results(agent_threat_intel: list, existing_cortex_results: list) -> list:
+    """Guarantee Agent 1's pre-fetched Cortex results survive into the final
+    EvidencePackage even if the agent's JSON output doesn't echo them back —
+    don't rely on the LLM to faithfully carry forward data it was only shown as
+    context. Agent's own findings win on conflict (deduped by observable)."""
+    seen = {r.observable for r in agent_threat_intel}
+    merged = list(agent_threat_intel)
+    for r in existing_cortex_results:
+        if r.observable not in seen:
+            merged.append(r)
+            seen.add(r.observable)
+    return merged
 
 
 def _extract_trace(messages: list) -> list[InvestigationTraceEntry]:
@@ -243,24 +274,13 @@ def _try_parse_json(text: str) -> dict | None:
     return None
 
 
-def _fallback_extract(messages: list) -> dict:
-    data: dict = {}
-    for msg in messages:
-        if getattr(msg, "type", None) == "tool":
-            name = getattr(msg, "name", "tool")
-            content = _try_parse_json(str(getattr(msg, "content", "{}")))
-            if not content:
-                content = {"raw": str(getattr(msg, "content", ""))[:300]}
-            if name not in data:
-                data[name] = []
-            data[name].append(content)
-    return data
-
-
-def _fallback_state(state: TriageState, mode: str, error: str) -> TriageState:
+def _fallback_state(state: TriageState, mode: str, error: str, existing_cortex_results: list) -> TriageState:
     gaps = [f"Agent invocation failed: {error}"]
     if mode == "new":
-        state["evidence_package"] = EvidencePackage(investigation_gaps=gaps)
+        state["evidence_package"] = EvidencePackage(
+            threat_intel=list(existing_cortex_results),
+            investigation_gaps=gaps,
+        )
         state["delta_evidence"] = None
     else:
         state["delta_evidence"] = DeltaEvidence(additional_context={}, investigation_gaps=gaps)

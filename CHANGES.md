@@ -6,7 +6,7 @@ Last updated: 2026-08-02
 - [x] Phase 2 — New input contract
 - [x] Phase 3 — Agent 1 (perceive.py)
 - [x] Phase 4 — Cortex integration (attempted via cortex-mcp, reverted to direct REST — see below)
-- [ ] Phase 5 — Agent 2 structured output
+- [x] Phase 5 — Agent 2 structured output
 - [ ] Phase 6 — Agent 3 two-pass MITRE
 - [ ] Phase 7 — Format output fixes + end-to-end
 - [ ] Phase 8 — Case action stub
@@ -69,6 +69,7 @@ instead of an MCP layer. Test count returned to 79 (the Phase 3 baseline).
 | graph.py | Replaced the single `correlate` node with `gate0` (dedup, pure Python) → `perceive` (Agent 1, LLM), per §13's shape. Routing: `gate0` → `format_output` on dedup hit, else `perceive`; `perceive` → `format_output` on dedup, else `investigate`. | 3 |
 | tests/test_graph.py | Rewrote route tests for `_route_after_gate0`/`_route_after_perceive` (was `_route_after_correlate`); `test_graph_nodes` now checks for `gate0`/`perceive` instead of `correlate` | 3 |
 | prompts/investigator.py | Net change after Phase 4 build + revert: retained 2 discipline rules (check existing `cortex_results` before calling `cortex_analyze`; skip common infrastructure) — everything cortex-mcp-specific (3-tool sequence, submit/wait pairing) was reverted along with the tool itself. Verified via `git diff` against the pre-Phase-4 commit: this is the only file with any net difference. | 4 |
+| nodes/investigate.py | Added an explicit "Existing Cortex results" block to Agent 2's human message (was only implicit via the full alert JSON dump); added `_merge_cortex_results()` so Agent 1's pre-fetched Cortex data survives into the final `EvidencePackage.threat_intel` regardless of the LLM's output, including on total agent failure; removed dead code `_gap_msg()`/`_fallback_extract()` (zero call sites); fixed a latent bug in `_to_cortex_results()`'s except-fallback path (re-used the same malformed `score` value that caused the exception, so the fallback threw the same error uncaught — added `_coerce_score()`) | 5 |
 
 ## Files created
 | File | Purpose | Phase |
@@ -78,6 +79,7 @@ instead of an MCP layer. Test count returned to 79 (the Phase 3 baseline).
 | prompts/perceiver.py | `build_prompt()` — Agent 1's system prompt: MITRE mapping + case correlation reasoning (entity match strength, kill-chain progression), 3-tool budget-4 ReAct loop, `{mitre_mapping, correlation_result}` JSON output contract. No `mode` parameter — Agent 1 *decides* mode, it doesn't receive it (the architecture doc's file-tree table says `build_prompt(mode)` for this file, but that's inconsistent with Agent 1's actual role per §6; built as `build_prompt()` instead). | 3 |
 | nodes/perceive.py | Replaces `nodes/correlate.py`. `gate0_dedup()` — pure Python Redis fingerprint check, ported verbatim from `correlate.py`. `perceive()` — Agent 1: a `create_react_agent` ReAct loop over `PERCEPTION_TOOLS` (`sigma_rule_lookup`, `qdrant_retrieve_mitre`, `thehive_open_cases`) producing `mitre_mapping` + `correlation_result`. On agent exception or unparseable JSON, falls back to `_fallback_deterministic()` — the same entity-match/kill-chain logic `correlate.py` used (ported, not imported, since `correlate.py` is retired), minus MITRE mapping (an empty list + a "fallback" reason is the safe degraded state, not a guess). Preserves the "every LLM-facing node has a non-LLM fallback" invariant. | 3 |
 | tests/test_perceive.py | 15 tests: ported kill-chain/tactic-index unit tests from `test_correlate.py`; `gate0_dedup` duplicate/no-duplicate/no-alert cases; `perceive()` with a mocked `create_react_agent` for new-mode and merge-mode JSON parsing, unparseable-JSON fallback, agent-`.invoke()`-exception fallback (mocking `.invoke()` to raise, not `create_react_agent()` itself — construction isn't try/except-wrapped, matching `investigate.py`'s existing pattern), already-deduplicated short-circuit, and missing-alert no-op | 3 |
+| tests/test_investigate.py | 17 tests, first-ever coverage for `investigate.py`: `_try_parse_json` edge cases, `_to_cortex_results` (including the malformed-score fallback bug found and fixed in this phase), `_merge_cortex_results` dedup behavior, `_build_from_tool_results` bucketing, `_extract_trace` call/result pairing, `_get_final_text`, and `investigate()` end-to-end for new-mode JSON parse, merge-mode JSON parse, unparseable-JSON fallback, existing-cortex-results survival through both the normal and agent-exception paths, and no-alert no-op | 5 |
 
 ## Files deleted / renamed
 | Old name | New name / action | Reason |
@@ -136,3 +138,4 @@ None — no new external services were wired up this session.
 | 3 | `python3 -m pytest tests/ -q` | 79 | 0 | `test_correlate.py` (11 tests) retired, `test_perceive.py` (15 tests) added, `test_graph.py` rewritten (7 tests) — net +3. Syntax check, import check, and `graph.nodes` inspection (`gate0`, `perceive`, `investigate`, `analyze`, `format_output` all present) also passed manually. |
 | 4 (build) | `python3 -m pytest tests/ -q` | 93 | 0 | +14 new tests in `test_cortex_mcp.py` (12) plus incidental coverage. `langchain-mcp-adapters` + `mcp==1.29.0` installed to make these imports/tests possible. |
 | 4 (revert) | `python3 -m pytest tests/ -q` | 79 | 0 | Back to the Phase 3 count — `test_cortex_mcp.py` deleted. `git diff` against the pre-Phase-4 commit confirms `config.py`/`tools/registry.py`/`requirements.txt` are byte-identical; `prompts/investigator.py` retains 2 intentional discipline-rule lines (see Files modified). `langchain-mcp-adapters`/`mcp` uninstalled from the environment. |
+| 5 | `python3 -m pytest tests/ -q` | 96 | 0 | +17 new tests in `test_investigate.py`. One test (`test_to_cortex_results_malformed_dict_falls_back`) initially failed against real (pre-existing) code, exposing the `_coerce_score` bug — fixed, then green. Syntax check and import check also passed manually. |

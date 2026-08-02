@@ -1465,11 +1465,23 @@ PHASE 4 — Cortex integration (DONE — cortex-mcp attempted and reverted)
     as Agent 2's Cortex path, same selective-invocation behavior
   Test: verify selective invocation (github.com skipped, rare hash analyzed)
 
-PHASE 5 — Agent 2 structured output
-  Update prompts/investigator.py: add EvidencePackage JSON schema
-  Update nodes/investigate.py: enforce structured output, add fallback-from-trace
-  Pass Agent 1's cortex_results to Agent 2 context (skip redundant Cortex calls)
-  Test: 10 real alerts, inspect EvidencePackage quality manually
+PHASE 5 — Agent 2 structured output (DONE)
+  prompts/investigator.py already had the EvidencePackage/DeltaEvidence JSON
+    schema and structured-output enforcement from earlier work — no change needed
+  nodes/investigate.py already had fallback-from-trace (_build_from_tool_results)
+    — no change needed
+  Added: explicit "Existing Cortex results" block in Agent 2's human message
+    (previously only implicit via the full alert JSON dump) + a deterministic
+    _merge_cortex_results() that guarantees Agent 1's pre-fetched Cortex data
+    survives into the final EvidencePackage.threat_intel regardless of whether
+    the LLM's JSON output echoes it back — including on total agent failure
+    (_fallback_state now seeds threat_intel from existing_cortex_results too)
+  Removed dead code: _gap_msg() and _fallback_extract() had zero call sites
+  Fixed a latent bug: _to_cortex_results()'s except-fallback path re-used the
+    same malformed score value via item.get(), so it threw the same
+    ValidationError it was supposed to catch — added _coerce_score()
+  Test: tests/test_investigate.py added (17 tests) — investigate.py had no
+    dedicated test file before this phase
 
 PHASE 6 — Agent 3 two-pass MITRE
   Update prompts/analyst.py: add instruction to validate Agent 1 mitre_mapping
