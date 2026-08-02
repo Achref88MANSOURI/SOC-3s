@@ -11,6 +11,7 @@ class HashBundle(BaseModel):
     sha1: list[str] = Field(default_factory=list)
     sha256: list[str] = Field(default_factory=list)
     sha512: list[str] = Field(default_factory=list)
+    imphash: list[str] = Field(default_factory=list)
 
 
 class Observables(BaseModel):
@@ -65,6 +66,16 @@ class File(BaseModel):
     mime_type: Optional[str] = None
 
 
+class CortexResult(BaseModel):
+    observable: str
+    type: str
+    verdict: str
+    score: int
+    details: str
+    analyzer: Optional[str] = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 class CanonicalAlert(BaseModel):
     alert_id: str
     timestamp: datetime
@@ -77,18 +88,18 @@ class CanonicalAlert(BaseModel):
     process: Optional[Process] = None
     file: Optional[File] = None
     observables: Observables = Field(default_factory=Observables)
+    cortex_results: list[CortexResult] = Field(default_factory=list)
+    asset_context: dict[str, Any] = Field(default_factory=dict)
     thehive_alert_id: str = ""
     thehive_observable_ids: dict[str, Any] = Field(default_factory=dict)
 
 
-class CortexResult(BaseModel):
-    observable: str
-    type: str
-    verdict: str
-    score: int
-    details: str
-    analyzer: Optional[str] = None
-    raw: dict[str, Any] = Field(default_factory=dict)
+class AlertWebhookPayload(BaseModel):
+    """Slim n8n → agent-service contract: n8n has already created the TheHive alert,
+    attached observables, and triggered Cortex analyzers. Agent 1 fetches the rest."""
+    thehive_alert_id: str
+    raw_alert: dict[str, Any]
+    asset_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class InvestigationTraceEntry(BaseModel):
@@ -151,6 +162,13 @@ class CorrelationResult(BaseModel):
     merge_into_case: Optional[str] = None
     existing_case_context: Optional[dict[str, Any]] = None
     reason: str = ""
+    confidence: str = "medium"
+
+
+class PerceptionResult(BaseModel):
+    canonical_alert: CanonicalAlert
+    mitre_mapping: list[MitreMapping] = Field(default_factory=list)
+    correlation_result: CorrelationResult = Field(default_factory=CorrelationResult)
 
 
 class TriageResult(BaseModel):
@@ -172,7 +190,13 @@ class TriageResult(BaseModel):
 
 
 class TriageState(TypedDict, total=False):
+    # Webhook path input (n8n's slim AlertWebhookPayload) — consumed by perceive().
+    raw_alert: Optional[dict[str, Any]]
+    asset_context: Optional[dict[str, Any]]
+    thehive_alert_id: Optional[str]
+
     canonical_alert: Optional[CanonicalAlert]
+    mitre_mapping: list[MitreMapping]
     mode: str
     correlation_result: Optional[CorrelationResult]
     existing_case_context: Optional[dict[str, Any]]
