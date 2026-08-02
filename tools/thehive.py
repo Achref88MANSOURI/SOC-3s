@@ -36,6 +36,17 @@ def _thehive_post(path: str, body: dict) -> dict | list:
     return resp.json()
 
 
+def _thehive_patch(path: str, body: dict) -> dict | list:
+    resp = requests.patch(
+        f"{THEHIVE_URL}/api{path}",
+        headers=_headers(),
+        json=body,
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def search_open_cases(
     observables: list[str] | None = None,
     host: str | None = None,
@@ -195,5 +206,74 @@ def get_case_full(case_id: str) -> dict | None:
                 "summary": case.get("summary", ""),
             }
         return None
+    except requests.exceptions.RequestException:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Write operations — used only by nodes/case_action.py, the post-approval path.
+# All read-only functions above are also used by the automated triage pipeline
+# (tools/registry.py); these are not, and are never registered as agent tools.
+#
+# UNVERIFIED against the live TheHive instance, unlike get_full_alert_with_
+# analysis() above — this module has no way to test writes against production
+# from here. Endpoint paths follow TheHive 5's documented v1 REST API shape.
+# Confirm against the live 5.6.1 instance's Swagger UI before this is ever
+# wired into a real approval flow.
+# ---------------------------------------------------------------------------
+
+def promote_alert_to_case(alert_id: str) -> dict | None:
+    """Promote a TheHive alert into a new case. Returns the created case."""
+    try:
+        return _thehive_post(f"/v1/alert/{alert_id}/case", {})
+    except requests.exceptions.RequestException:
+        return None
+
+
+def update_case(
+    case_id: str,
+    title: str | None = None,
+    severity: int | None = None,
+    tags: list[str] | None = None,
+) -> dict | None:
+    body: dict = {}
+    if title is not None:
+        body["title"] = title
+    if severity is not None:
+        body["severity"] = severity
+    if tags is not None:
+        body["tags"] = tags
+    if not body:
+        return None
+    try:
+        return _thehive_patch(f"/v1/case/{case_id}", body)
+    except requests.exceptions.RequestException:
+        return None
+
+
+def add_case_comment(case_id: str, comment: str) -> dict | None:
+    try:
+        return _thehive_post(f"/v1/case/{case_id}/comment", {"message": comment})
+    except requests.exceptions.RequestException:
+        return None
+
+
+def update_alert_status(alert_id: str, status: str) -> dict | None:
+    try:
+        return _thehive_patch(f"/v1/alert/{alert_id}", {"status": status})
+    except requests.exceptions.RequestException:
+        return None
+
+
+def add_alert_comment(alert_id: str, comment: str) -> dict | None:
+    try:
+        return _thehive_post(f"/v1/alert/{alert_id}/comment", {"message": comment})
+    except requests.exceptions.RequestException:
+        return None
+
+
+def merge_alert_into_case(alert_id: str, case_id: str) -> dict | None:
+    try:
+        return _thehive_post(f"/v1/alert/{alert_id}/merge/{case_id}", {})
     except requests.exceptions.RequestException:
         return None

@@ -1520,11 +1520,32 @@ PHASE 7 — Fix format_output.py + end-to-end test (DONE — verification only, 
     deduplicated result short-circuits before investigate's agent is ever
     constructed.
 
-PHASE 8 — Case action stub
-  Create nodes/case_action.py with execute_case_action()
-  Require approved: bool parameter
-  Implement promote / merge / comment via thehive4py
-  Test: approved=True triggers correct TheHive operation
+PHASE 8 — Case action stub (DONE — not wired into graph.py, as intended)
+  Created nodes/case_action.py with execute_case_action(triage_result, approved)
+    -> dict. Raises ValueError immediately if approved is False, before any
+    TheHive call. Four branches keyed on triage_result.action: create_case
+    (promote alert -> case, set title/severity/tags, post investigation summary
+    as comment), close_fp (update alert status, post reasoning as comment),
+    merge_quiet (merge alert into case, post delta summary as comment),
+    merge_and_retier (merge + update case severity + urgent_notification_required
+    flag in the result — actual notification delivery is out of scope for a
+    TheHive-only module). Unknown actions return {"status": "skipped", ...}
+    rather than raising.
+  Implemented via direct REST (tools/thehive.py), not thehive4py and not TheHive
+    MCP — consistent with Decision 5 and the tools/thehive.py precedent set in
+    Phase 2. New write functions added: promote_alert_to_case, update_case,
+    add_case_comment, update_alert_status, add_alert_comment,
+    merge_alert_into_case. UNVERIFIED against the live TheHive 5.6.1 instance
+    (unlike get_full_alert_with_analysis) — endpoint paths follow TheHive 5's
+    documented v1 REST API shape; confirm against the live Swagger UI before
+    this is ever wired into a real approval flow.
+  Not added to tools/registry.py's TOOLS — these are write operations, never
+    exposed to the LLM agents, preserving "all agent tools are read-only"
+  Test: tests/test_case_action.py (11 tests) — approved=False raises before any
+    TheHive call, all four branches call the right operations with the right
+    arguments (mocking tools/thehive.py), missing merge_into_case on the merge
+    branches returns a clean error dict, unknown/deduplicated actions skip
+    gracefully
 
 PHASE 9 — n8n integration updates
   Remove Switch1 + per-type Cortex analyzer nodes

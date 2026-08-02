@@ -9,7 +9,7 @@ Last updated: 2026-08-02
 - [x] Phase 5 — Agent 2 structured output
 - [x] Phase 6 — Agent 3 two-pass MITRE
 - [x] Phase 7 — Format output fixes + end-to-end (verification only — nothing was broken)
-- [ ] Phase 8 — Case action stub
+- [x] Phase 8 — Case action stub
 - [ ] Phase 9 — n8n integration notes
 - [ ] Phase 10 — Tests
 
@@ -72,6 +72,7 @@ instead of an MCP layer. Test count returned to 79 (the Phase 3 baseline).
 | nodes/investigate.py | Added an explicit "Existing Cortex results" block to Agent 2's human message (was only implicit via the full alert JSON dump); added `_merge_cortex_results()` so Agent 1's pre-fetched Cortex data survives into the final `EvidencePackage.threat_intel` regardless of the LLM's output, including on total agent failure; removed dead code `_gap_msg()`/`_fallback_extract()` (zero call sites); fixed a latent bug in `_to_cortex_results()`'s except-fallback path (re-used the same malformed `score` value that caused the exception, so the fallback threw the same error uncaught — added `_coerce_score()`) | 5 |
 | nodes/analyze.py | `mode == "new"` branch now reads `state["mitre_mapping"]` (Agent 1's output) and includes it as `agent1_initial_mitre_mapping` in the human message, ahead of `evidence_package_summary` — targeted change, merge-mode branch untouched | 6 |
 | prompts/analyst.py | Step 3 rewritten from "produce a mapping" to an explicit validate-and-refine instruction against `agent1_initial_mitre_mapping` — keep+recompute confidence if evidence confirms a technique, drop/downgrade if contradicted, add if evidence reveals something Agent 1 missed. Rest of the prompt (Steps 1-2, 4-7, MERGE_PROMPT, schemas, GBNF grammar) untouched. | 6 |
+| tools/thehive.py | Added a `_thehive_patch()` helper (matching the existing `_thehive_get`/`_thehive_post` style) and 6 write functions for `nodes/case_action.py`: `promote_alert_to_case`, `update_case`, `add_case_comment`, `update_alert_status`, `add_alert_comment`, `merge_alert_into_case`. All existing read-only functions untouched. Not registered in `tools/registry.py` — read-only invariant for the LLM agents preserved. | 8 |
 | tests/test_analyze.py | Added 3 tests mocking `nodes.analyze._llm` — first LLM-in-the-loop test coverage for this module (previously only pure-helper tests existed): `agent1_initial_mitre_mapping` reaches the human message, the final `TriageVerdict.mitre_mapping` is Agent 3's own parsed output (not a pass-through — used deliberately different technique IDs in agent1 vs agent3 mock output to prove it), and the missing-`state["mitre_mapping"]` case degrades gracefully | 6 |
 
 ## Phase 7 — verification only, no fixes needed
@@ -92,6 +93,27 @@ open turned out to already be resolved:
 No code changes to `format_output.py` or `schemas.py` this phase — per the
 user's instruction to fix only what's actually broken.
 
+## Phase 8 — case action stub, unwired by design
+
+`nodes/case_action.py` is intentionally **not** imported by `graph.py` or
+`main.py` — verified with `grep` after implementation. n8n still performs case
+actions today; this is the future post-approval path. The write functions added
+to `tools/thehive.py` are also **not** added to `tools/registry.py`'s `TOOLS` —
+verified the list is unchanged (still the same 6 read-only tools) so the LLM
+agents never gain write access.
+
+**Caveat carried forward, not resolved this phase:** the new `tools/thehive.py`
+write functions (`promote_alert_to_case`, `update_case`, `add_case_comment`,
+`update_alert_status`, `add_alert_comment`, `merge_alert_into_case`) are
+implemented against TheHive 5's documented v1 REST API shape, but — unlike
+`get_full_alert_with_analysis()` — have not been verified against the live
+5.6.1 instance from this environment (no live TheHive reachable here, and this
+code isn't wired into anything that would exercise it against production).
+Confirm the exact endpoint paths and accepted `status` enum values (particularly
+whether `"FP"` is a valid alert status string on this instance, vs. e.g.
+`"Ignored"`) against the live Swagger UI before wiring this into a real
+approval flow.
+
 ## Files created
 | File | Purpose | Phase |
 |------|---------|-------|
@@ -103,8 +125,8 @@ user's instruction to fix only what's actually broken.
 | tests/test_investigate.py | 17 tests, first-ever coverage for `investigate.py`: `_try_parse_json` edge cases, `_to_cortex_results` (including the malformed-score fallback bug found and fixed in this phase), `_merge_cortex_results` dedup behavior, `_build_from_tool_results` bucketing, `_extract_trace` call/result pairing, `_get_final_text`, and `investigate()` end-to-end for new-mode JSON parse, merge-mode JSON parse, unparseable-JSON fallback, existing-cortex-results survival through both the normal and agent-exception paths, and no-alert no-op | 5 |
 
 | tests/test_e2e.py | 2 tests via FastAPI's `TestClient` against the real `/triage` route (not `graph.invoke()` directly — exercises `main.py`'s wiring too): a full new-mode run using `alert-sample.json`'s raw Security Onion webhook body converted into the actual `AlertWebhookPayload.raw_alert` shape n8n sends, with all 6 external dependencies mocked (TheHive fetch, Agent 1/2 ReAct-loop LLM calls, Agent 3's direct LLM call — Qdrant/ES/iTop/Cortex only reachable through the mocked ReAct loops), asserting 200 + a well-formed `TriageResult`; and a deduplicated-result routing test asserting `investigate`'s agent is never constructed when `perceive` reports `action=deduplicated` | 7 |
-
-## Files deleted / renamed
+| nodes/case_action.py | `execute_case_action(triage_result, approved) -> dict` — the post-approval TheHive write path (stub, not wired into `graph.py`). Raises `ValueError` immediately if `approved` is `False`. 4 branches on `triage_result.action`: `create_case`/`close_fp`/`merge_quiet`/`merge_and_retier` per the exact spec in §10. Unknown actions return `{"status": "skipped", ...}`. | 8 |
+| tests/test_case_action.py | 11 tests mocking `tools/thehive.py`: `approved=False` raises before any TheHive call (both a bare-raise check and a call-count check), all 4 action branches call the right operations with the right arguments (including severity string→int mapping and MITRE-tag construction for `create_case`), missing `merge_into_case` on both merge branches returns a clean error dict instead of calling TheHive with `None`, unknown and `deduplicated` actions skip gracefully | 8 |
 | Old name | New name / action | Reason |
 |----------|------------------|--------|
 | nodes/correlate.py | nodes/perceive.py | Role changed from pure-Python correlation to LLM-powered perception + correlation, per architecture §17 Decision 1 |
@@ -135,6 +157,7 @@ None — no new external services were wired up this session.
 | Proceed to Phase 5 | Yes — Agent 2 structured output | 5 |
 | Proceed to Phase 6 | Yes — Agent 3 two-pass MITRE validation. User specified the exact scope: nodes/analyze.py passes perception_result.mitre_mapping to Agent 3, prompts/analyst.py instructs validation against evidence, TriageVerdict.mitre_mapping must reflect Agent 3's validated mapping not a blind pass-through, targeted change only | 6 |
 | Proceed to Phase 7 | Yes — format_output.py fixes + end-to-end test. User specified: verify (not assume) the deduplicated check and §18 bug 5 status against current code first, report findings, then fix only what's actually broken; e2e test must mock all external calls (TheHive, LLM, Qdrant, ES, iTop, Cortex) | 7 |
+| Proceed to Phase 8 | Yes — case action stub. User specified the exact signature, the four action branches and what each must do, direct REST not TheHive MCP (citing Decision 5), that it's a stub not wired into the graph, and to read tools/thehive.py first before adding anything | 8 |
 
 ## Questions pending user response
 | Question | Why needed | Blocking phase |
@@ -153,6 +176,8 @@ None — no new external services were wired up this session.
 - [ ] `test_perceive.py`'s LLM-path tests mock `create_react_agent` entirely (no real model call) — same limitation `investigate.py`/`analyze.py` already had (no LLM-in-the-loop test coverage exists anywhere in this suite). Real behavior against qwen3:30b-a3b hasn't been verified.
 - [x] ~~`mcp` 2.0.0 breaks `langchain-mcp-adapters` 0.3.1~~ — moot: `mcp`/`langchain-mcp-adapters` uninstalled from the environment and removed from `requirements.txt` along with the rest of the cortex-mcp revert.
 - [x] ~~cortex-mcp's `.env` vars not actually present~~ — moot: cortex-mcp integration reverted, those vars are no longer used anywhere in the code.
+- [ ] `nodes/case_action.py`'s TheHive write functions (`promote_alert_to_case`, `update_case`, `add_case_comment`, `update_alert_status`, `add_alert_comment`, `merge_alert_into_case`) are implemented from TheHive 5's documented v1 REST API shape, not verified against the live 5.6.1 instance — this module is a stub, not wired into anything that would exercise it against production. Verify endpoint paths and the accepted alert `status` enum (is `"FP"` actually valid, or should it be `"Ignored"`?) against the live Swagger UI before wiring this into a real approval flow.
+- [ ] `nodes/case_action.py` is not wired into `graph.py`/`main.py` — intentional per Phase 8 scope, but means there's currently no code path that actually calls it outside tests. Wiring it in (behind an approval gate) is future work, not scoped to any phase yet.
 - [x] ~~Whether agent-service runs on the same host as cortex-mcp~~ — resolved: it doesn't (172.20.24.224 vs 172.20.24.221), which is exactly why Phase 4 was reverted.
 
 ## Test results
@@ -166,3 +191,4 @@ None — no new external services were wired up this session.
 | 5 | `python3 -m pytest tests/ -q` | 96 | 0 | +17 new tests in `test_investigate.py`. One test (`test_to_cortex_results_malformed_dict_falls_back`) initially failed against real (pre-existing) code, exposing the `_coerce_score` bug — fixed, then green. Syntax check and import check also passed manually. |
 | 6 | `python3 -m pytest tests/ -q` | 99 | 0 | +3 new tests in `test_analyze.py`. Syntax check and import check also passed manually. |
 | 7 | `python3 -m pytest tests/ -q` | 101 | 0 | +2 new tests in `test_e2e.py` (both passed on first run — no code changes needed this phase). Syntax check and import check also passed manually. |
+| 8 | `python3 -m pytest tests/ -q` | 112 | 0 | +11 new tests in `test_case_action.py`. Syntax check, import check, and `tools.registry.TOOLS` listing (unchanged — still 6 read-only tools) also verified manually. Confirmed via `grep` that `case_action` is not referenced in `graph.py`/`main.py`. |
