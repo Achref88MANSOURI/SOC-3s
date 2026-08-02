@@ -1502,10 +1502,23 @@ PHASE 6 — Agent 3 two-pass MITRE (DONE)
     reaches the prompt, the final mapping is Agent 3's own output not a
     pass-through, and the missing-mapping case degrades gracefully
 
-PHASE 7 — Fix format_output.py + end-to-end test
-  Fix bug 3 (action string consistency)
-  Fix bug 4 (deduplicated check)
-  Test full graph: real alert in → TriageResult out
+PHASE 7 — Fix format_output.py + end-to-end test (DONE — verification only, nothing to fix)
+  Bug 3 (action string consistency) and bug 4 (deduplicated check) were both
+    already fixed by the time Phase 1 was reached (see §18 table + CHANGES.md) —
+    verified again here: format_output.py checks corr.action == "deduplicated"
+    correctly, no boolean field exists on CorrelationResult to confuse it with
+  Verified §18 bug 5 (Impact/Likelihood/Severity Literal aliases) is not a live
+    bug: grepped the full codebase, nothing imports those names anywhere
+  Test full graph: real alert in → TriageResult out. tests/test_e2e.py added —
+    POST /triage via FastAPI's TestClient with alert-sample.json's raw Security
+    Onion webhook body converted into the AlertWebhookPayload.raw_alert shape
+    n8n actually sends (§3), all 6 external dependencies mocked (TheHive fetch,
+    Agent 1/2's ReAct-loop LLM, Agent 3's direct LLM call — Qdrant/ES/iTop/Cortex
+    are only reachable through the mocked ReAct loops, so covered transitively).
+    Confirms a full new-mode run (gate0 → perceive → investigate → analyze →
+    format_output) returns 200 with a well-formed TriageResult, and that a
+    deduplicated result short-circuits before investigate's agent is ever
+    constructed.
 
 PHASE 8 — Case action stub
   Create nodes/case_action.py with execute_case_action()
