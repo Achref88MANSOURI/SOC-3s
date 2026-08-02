@@ -1483,10 +1483,24 @@ PHASE 5 — Agent 2 structured output (DONE)
   Test: tests/test_investigate.py added (17 tests) — investigate.py had no
     dedicated test file before this phase
 
-PHASE 6 — Agent 3 two-pass MITRE
-  Update prompts/analyst.py: add instruction to validate Agent 1 mitre_mapping
-  Update nodes/analyze.py: pass perception_result.mitre_mapping in evidence summary
-  Test: compare Agent 3's final mapping vs Agent 1's initial mapping on 10 alerts
+PHASE 6 — Agent 3 two-pass MITRE (DONE)
+  Updated nodes/analyze.py: mode="new" now reads state["mitre_mapping"] (Agent 1's
+    output, set by nodes/perceive.py) and includes it as agent1_initial_mitre_mapping
+    in the human message sent to Agent 3, ahead of evidence_package_summary
+  Updated prompts/analyst.py: Step 3 rewritten as an explicit validate-and-refine
+    instruction (keep+recompute confidence if evidence confirms, drop/downgrade if
+    contradicted, add if evidence reveals something Agent 1 missed) instead of
+    "produce a mapping from scratch"
+  TriageVerdict.mitre_mapping already came from Agent 3's own parsed JSON output
+    (TriageVerdict(**parsed)), never a pass-through of Agent 1's — that invariant
+    held before this phase, just needed Agent 3 to actually see Agent 1's mapping
+    to validate against
+  Merge mode untouched — DeltaVerdict.new_mitre_stages is a different concept
+    (new kill-chain stages introduced by the delta), not full-mapping validation
+  Test: tests/test_analyze.py — 3 new tests mocking nodes.analyze._llm (first
+    LLM-in-the-loop test coverage for this module) verifying agent1's mapping
+    reaches the prompt, the final mapping is Agent 3's own output not a
+    pass-through, and the missing-mapping case degrades gracefully
 
 PHASE 7 — Fix format_output.py + end-to-end test
   Fix bug 3 (action string consistency)

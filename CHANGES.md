@@ -7,7 +7,7 @@ Last updated: 2026-08-02
 - [x] Phase 3 — Agent 1 (perceive.py)
 - [x] Phase 4 — Cortex integration (attempted via cortex-mcp, reverted to direct REST — see below)
 - [x] Phase 5 — Agent 2 structured output
-- [ ] Phase 6 — Agent 3 two-pass MITRE
+- [x] Phase 6 — Agent 3 two-pass MITRE
 - [ ] Phase 7 — Format output fixes + end-to-end
 - [ ] Phase 8 — Case action stub
 - [ ] Phase 9 — n8n integration notes
@@ -70,6 +70,9 @@ instead of an MCP layer. Test count returned to 79 (the Phase 3 baseline).
 | tests/test_graph.py | Rewrote route tests for `_route_after_gate0`/`_route_after_perceive` (was `_route_after_correlate`); `test_graph_nodes` now checks for `gate0`/`perceive` instead of `correlate` | 3 |
 | prompts/investigator.py | Net change after Phase 4 build + revert: retained 2 discipline rules (check existing `cortex_results` before calling `cortex_analyze`; skip common infrastructure) — everything cortex-mcp-specific (3-tool sequence, submit/wait pairing) was reverted along with the tool itself. Verified via `git diff` against the pre-Phase-4 commit: this is the only file with any net difference. | 4 |
 | nodes/investigate.py | Added an explicit "Existing Cortex results" block to Agent 2's human message (was only implicit via the full alert JSON dump); added `_merge_cortex_results()` so Agent 1's pre-fetched Cortex data survives into the final `EvidencePackage.threat_intel` regardless of the LLM's output, including on total agent failure; removed dead code `_gap_msg()`/`_fallback_extract()` (zero call sites); fixed a latent bug in `_to_cortex_results()`'s except-fallback path (re-used the same malformed `score` value that caused the exception, so the fallback threw the same error uncaught — added `_coerce_score()`) | 5 |
+| nodes/analyze.py | `mode == "new"` branch now reads `state["mitre_mapping"]` (Agent 1's output) and includes it as `agent1_initial_mitre_mapping` in the human message, ahead of `evidence_package_summary` — targeted change, merge-mode branch untouched | 6 |
+| prompts/analyst.py | Step 3 rewritten from "produce a mapping" to an explicit validate-and-refine instruction against `agent1_initial_mitre_mapping` — keep+recompute confidence if evidence confirms a technique, drop/downgrade if contradicted, add if evidence reveals something Agent 1 missed. Rest of the prompt (Steps 1-2, 4-7, MERGE_PROMPT, schemas, GBNF grammar) untouched. | 6 |
+| tests/test_analyze.py | Added 3 tests mocking `nodes.analyze._llm` — first LLM-in-the-loop test coverage for this module (previously only pure-helper tests existed): `agent1_initial_mitre_mapping` reaches the human message, the final `TriageVerdict.mitre_mapping` is Agent 3's own parsed output (not a pass-through — used deliberately different technique IDs in agent1 vs agent3 mock output to prove it), and the missing-`state["mitre_mapping"]` case degrades gracefully | 6 |
 
 ## Files created
 | File | Purpose | Phase |
@@ -110,6 +113,7 @@ None — no new external services were wired up this session.
 | cortex-mcp deployment topology finding | stdio-only (`StdioServerTransport` hardcoded, no HTTP mode), agent-service (172.20.24.224) and cortex-mcp (172.20.24.221) on different VMs — stdio cannot cross that boundary | 4 (revert) |
 | Revert decision | Remove `tools/cortex_mcp.py`, restore `tools/cortex.py`/direct REST as Agent 2's Cortex path, same selective-invocation behavior via Agent 2's own reasoning | 4 (revert) |
 | Proceed to Phase 5 | Yes — Agent 2 structured output | 5 |
+| Proceed to Phase 6 | Yes — Agent 3 two-pass MITRE validation. User specified the exact scope: nodes/analyze.py passes perception_result.mitre_mapping to Agent 3, prompts/analyst.py instructs validation against evidence, TriageVerdict.mitre_mapping must reflect Agent 3's validated mapping not a blind pass-through, targeted change only | 6 |
 
 ## Questions pending user response
 | Question | Why needed | Blocking phase |
@@ -139,3 +143,4 @@ None — no new external services were wired up this session.
 | 4 (build) | `python3 -m pytest tests/ -q` | 93 | 0 | +14 new tests in `test_cortex_mcp.py` (12) plus incidental coverage. `langchain-mcp-adapters` + `mcp==1.29.0` installed to make these imports/tests possible. |
 | 4 (revert) | `python3 -m pytest tests/ -q` | 79 | 0 | Back to the Phase 3 count — `test_cortex_mcp.py` deleted. `git diff` against the pre-Phase-4 commit confirms `config.py`/`tools/registry.py`/`requirements.txt` are byte-identical; `prompts/investigator.py` retains 2 intentional discipline-rule lines (see Files modified). `langchain-mcp-adapters`/`mcp` uninstalled from the environment. |
 | 5 | `python3 -m pytest tests/ -q` | 96 | 0 | +17 new tests in `test_investigate.py`. One test (`test_to_cortex_results_malformed_dict_falls_back`) initially failed against real (pre-existing) code, exposing the `_coerce_score` bug — fixed, then green. Syntax check and import check also passed manually. |
+| 6 | `python3 -m pytest tests/ -q` | 99 | 0 | +3 new tests in `test_analyze.py`. Syntax check and import check also passed manually. |

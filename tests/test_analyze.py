@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
-from schemas import CanonicalAlert, EvidencePackage, Rule, TriageState, TriageVerdict, DeltaVerdict
-from nodes.analyze import _extract_json, _summarize_evidence
+from schemas import CanonicalAlert, EvidencePackage, MitreMapping, Rule, TriageState, TriageVerdict, DeltaVerdict
+from nodes.analyze import _extract_json, _summarize_evidence, analyze
 
 
 def test_extract_json_simple():
@@ -97,3 +99,64 @@ def test_extract_json_unclosed_brace():
     """Should return None for malformed JSON."""
     text = '{"key": "value"'
     assert _extract_json(text) is None
+
+
+def _fake_response(content: str):
+    resp = MagicMock()
+    resp.content = content
+    return resp
+
+
+@patch("nodes.analyze._llm")
+def test_analyze_passes_agent1_mitre_mapping_to_llm(mock_llm):
+    verdict = {
+        "likelihood": "likely", "impact_if_true": "severe", "verdict": "true_positive",
+        "mitre_mapping": [], "reasoning": "r", "recommended_action": "create_case", "summary": "s",
+    }
+    mock_llm.invoke.return_value = _fake_response(json.dumps(verdict))
+
+    state: TriageState = {
+        "mode": "new",
+        "evidence_package": EvidencePackage(),
+        "mitre_mapping": [MitreMapping(tactic="execution", technique="T1059", confidence="high", basis="rule tag")],
+    }
+    analyze(state)
+
+    human_content = mock_llm.invoke.call_args.args[0][1]["content"]
+    assert "agent1_initial_mitre_mapping" in human_content
+    assert "T1059" in human_content
+
+
+@patch("nodes.analyze._llm")
+def test_analyze_final_mitre_mapping_comes_from_agent3_not_agent1(mock_llm):
+    verdict = {
+        "likelihood": "likely", "impact_if_true": "severe", "verdict": "true_positive",
+        "mitre_mapping": [{"tactic": "impact", "technique": "T1486", "confidence": "high", "basis": "evidence confirmed ransomware behavior"}],
+        "reasoning": "r", "recommended_action": "create_case", "summary": "s",
+    }
+    mock_llm.invoke.return_value = _fake_response(json.dumps(verdict))
+
+    state: TriageState = {
+        "mode": "new",
+        "evidence_package": EvidencePackage(),
+        "mitre_mapping": [MitreMapping(tactic="execution", technique="T1059", confidence="low", basis="unconfirmed guess")],
+    }
+    result = analyze(state)
+
+    final_mapping = result["triage_verdict"].mitre_mapping
+    assert len(final_mapping) == 1
+    assert final_mapping[0].technique == "T1486"  # Agent 3's own validated mapping, not Agent 1's T1059
+
+
+@patch("nodes.analyze._llm")
+def test_analyze_handles_missing_agent1_mitre_mapping(mock_llm):
+    verdict = {
+        "likelihood": "possible", "impact_if_true": "minor", "verdict": "false_positive",
+        "mitre_mapping": [], "reasoning": "r", "recommended_action": "close_fp", "summary": "s",
+    }
+    mock_llm.invoke.return_value = _fake_response(json.dumps(verdict))
+
+    state: TriageState = {"mode": "new", "evidence_package": EvidencePackage()}
+    result = analyze(state)
+
+    assert result["triage_verdict"].verdict == "false_positive"
