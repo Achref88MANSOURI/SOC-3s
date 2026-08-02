@@ -1551,11 +1551,22 @@ PHASE 8 — Case action stub (DONE — not wired into graph.py, as intended)
     branches returns a clean error dict, unknown/deduplicated actions skip
     gracefully
 
-PHASE 9 — n8n integration updates
-  Remove Switch1 + per-type Cortex analyzer nodes
-  Add HTTP POST to /triage with slim AlertWebhookPayload
-  Add Switch on triage_result.action → case action branches
+PHASE 9 — n8n integration updates (DOCUMENTED — n8n isn't in this repo, see
+    N8N-INTEGRATION.md for the full migration guide; nothing applied to a live
+    n8n instance from here)
+  Remove Switch1 + per-type Cortex analyzer nodes — documented
+  Add HTTP POST to /triage with slim AlertWebhookPayload — documented, with
+    the exact raw_alert shape and a note that the observable-ID fetch step is
+    also no longer needed (get_full_alert_with_analysis() fetches it itself)
+  Add Switch on triage_result.action → case action branches — documented,
+    including the "Ignored" not "FP" status fix from the same session
+  Clarified a boundary that isn't obvious from the code alone: n8n still
+    performs the actual TheHive writes today — nodes/case_action.py exists but
+    isn't wired into graph.py/main.py, so nothing calls it yet
   Test: live Security Onion alert → n8n → agent-service → TheHive case created
+    — a testing checklist is in N8N-INTEGRATION.md §8; actual execution
+    requires a live n8n + TheHive + Security Onion environment not reachable
+    from this session
 
 PHASE 10 — Tests
   Update test_schemas.py for all new models

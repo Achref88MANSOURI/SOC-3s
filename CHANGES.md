@@ -10,7 +10,7 @@ Last updated: 2026-08-02
 - [x] Phase 6 — Agent 3 two-pass MITRE
 - [x] Phase 7 — Format output fixes + end-to-end (verification only — nothing was broken)
 - [x] Phase 8 — Case action stub
-- [ ] Phase 9 — n8n integration notes
+- [x] Phase 9 — n8n integration notes
 - [ ] Phase 10 — Tests
 
 ## Phase 1 — status at session start (no code changes needed)
@@ -113,6 +113,26 @@ Confirm the exact endpoint paths against the live Swagger UI before wiring
 this into a real approval flow. **Update:** the alert `status` enum question
 specifically was resolved the same session — see below.
 
+## Phase 9 — n8n integration documentation
+
+n8n isn't part of this repo (`CLAUDE.md`: "n8n POSTs a normalized canonical_alert
+to /triage" — it's the ingestion layer, lives elsewhere). Phase 9's deliverable
+is therefore a document, not code: `N8N-INTEGRATION.md`, written for whoever
+maintains the actual n8n workflow. Nothing in it was applied to a live n8n
+instance — there's no n8n reachable from this session to apply or test against.
+
+Covers: the new slim `/triage` request contract (with the exact `raw_alert`
+shape restated from `SOC-3s-ARCHITECTURE-v2.md` §3), which n8n nodes to remove
+(the Cortex Switch/analyzer nodes, the observable-ID fetch step — both now
+redundant since Agent 2 calls Cortex itself and `get_full_alert_with_analysis()`
+fetches observables itself), the `TriageResult` response shape and action
+routing table (including the "Ignored" not "FP" fix), and an explicit callout
+that `nodes/case_action.py` is **not** wired into the graph — n8n still
+performs the actual TheHive writes today, exactly as before this migration.
+Also notes that if n8n's existing case-action HTTP nodes already work in
+production, they're a more trustworthy source of truth for exact TheHive
+endpoint shapes than `tools/thehive.py`'s new (unverified) write functions.
+
 ### Follow-up fix: close_fp uses "Ignored", not "FP"
 
 User verified against the live TheHive 5.6.1 instance's UI: no custom alert
@@ -138,6 +158,7 @@ assert `"Ignored"`. One-line fix + one test assertion, as scoped. Also updated
 | tests/test_e2e.py | 2 tests via FastAPI's `TestClient` against the real `/triage` route (not `graph.invoke()` directly — exercises `main.py`'s wiring too): a full new-mode run using `alert-sample.json`'s raw Security Onion webhook body converted into the actual `AlertWebhookPayload.raw_alert` shape n8n sends, with all 6 external dependencies mocked (TheHive fetch, Agent 1/2 ReAct-loop LLM calls, Agent 3's direct LLM call — Qdrant/ES/iTop/Cortex only reachable through the mocked ReAct loops), asserting 200 + a well-formed `TriageResult`; and a deduplicated-result routing test asserting `investigate`'s agent is never constructed when `perceive` reports `action=deduplicated` | 7 |
 | nodes/case_action.py | `execute_case_action(triage_result, approved) -> dict` — the post-approval TheHive write path (stub, not wired into `graph.py`). Raises `ValueError` immediately if `approved` is `False`. 4 branches on `triage_result.action`: `create_case`/`close_fp`/`merge_quiet`/`merge_and_retier` per the exact spec in §10. Unknown actions return `{"status": "skipped", ...}`. | 8 |
 | tests/test_case_action.py | 11 tests mocking `tools/thehive.py`: `approved=False` raises before any TheHive call (both a bare-raise check and a call-count check), all 4 action branches call the right operations with the right arguments (including severity string→int mapping and MITRE-tag construction for `create_case`), missing `merge_into_case` on both merge branches returns a clean error dict instead of calling TheHive with `None`, unknown and `deduplicated` actions skip gracefully | 8 |
+| N8N-INTEGRATION.md | Migration guide for whoever maintains the n8n workflow (n8n isn't in this repo) — the new slim `/triage` request contract, which n8n nodes to remove, the `TriageResult` response/routing table, the "Ignored" vs "FP" fix, and an explicit callout that n8n still performs TheHive writes today since `nodes/case_action.py` isn't wired in | 9 |
 | Old name | New name / action | Reason |
 |----------|------------------|--------|
 | nodes/correlate.py | nodes/perceive.py | Role changed from pure-Python correlation to LLM-powered perception + correlation, per architecture §17 Decision 1 |
@@ -170,6 +191,7 @@ None — no new external services were wired up this session.
 | Proceed to Phase 7 | Yes — format_output.py fixes + end-to-end test. User specified: verify (not assume) the deduplicated check and §18 bug 5 status against current code first, report findings, then fix only what's actually broken; e2e test must mock all external calls (TheHive, LLM, Qdrant, ES, iTop, Cortex) | 7 |
 | Proceed to Phase 8 | Yes — case action stub. User specified the exact signature, the four action branches and what each must do, direct REST not TheHive MCP (citing Decision 5), that it's a stub not wired into the graph, and to read tools/thehive.py first before adding anything | 8 |
 | Is "FP" a valid TheHive 5.6.1 alert status? | No — user verified against the live UI: no custom statuses configured, only built-in New/Updated/Ignored/Imported. close_fp must use "Ignored". | 8 (follow-up) |
+| Proceed to Phase 9 | Yes — N8N-INTEGRATION.md documentation, no other code changes | 9 |
 
 ## Questions pending user response
 | Question | Why needed | Blocking phase |
@@ -205,3 +227,4 @@ None — no new external services were wired up this session.
 | 7 | `python3 -m pytest tests/ -q` | 101 | 0 | +2 new tests in `test_e2e.py` (both passed on first run — no code changes needed this phase). Syntax check and import check also passed manually. |
 | 8 | `python3 -m pytest tests/ -q` | 112 | 0 | +11 new tests in `test_case_action.py`. Syntax check, import check, and `tools.registry.TOOLS` listing (unchanged — still 6 read-only tools) also verified manually. Confirmed via `grep` that `case_action` is not referenced in `graph.py`/`main.py`. |
 | 8 (follow-up) | `python3 -m pytest tests/ -q` | 112 | 0 | "FP" → "Ignored" fix — one line in `nodes/case_action.py`, one assertion in `tests/test_case_action.py`. Same test count, all still green. |
+| 9 | `python3 -m pytest tests/ -q` | 112 | 0 | Documentation-only phase — no code changed, same test count. |
