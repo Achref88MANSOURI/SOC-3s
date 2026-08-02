@@ -130,7 +130,7 @@ structured triage verdict that n8n uses to drive case management actions in TheH
 │  AGENT 2 ── Investigate (LLM ReAct + tools)                      │
 │    mode=new:   full investigation, max 8 tool calls              │
 │    mode=merge: delta only, max 5 tool calls                      │
-│    - Selective Cortex analysis via cortex-mcp                   │
+│    - Selective Cortex analysis via direct REST (cortex-mcp reverted) │
 │    - Historical alerts via Elasticsearch direct                  │
 │    - Asset context via iTop direct                               │
 │    - Past cases via TheHive REST                                 │
@@ -470,7 +470,7 @@ asset_context:      hostname, criticality, owner, department,
                     services, network_zone
 threat_intel:       per-observable verdict, score, analyzer, details
                     (populated from TheHive Cortex reports first,
-                     supplemented by selective cortex-mcp calls)
+                     supplemented by selective cortex_analyze calls)
 temporal_context:   related_alerts_same_host_24h,
                     related_alerts_same_user_24h,
                     related_alerts_shared_iocs,
@@ -498,7 +498,7 @@ FOCUS:  what does this NEW alert add to the existing case?
    from the initial alert creation. Don't re-run Cortex on observables already
    analyzed unless the result was inconclusive.
 2. **Call cheapest tools first:** `sigma_rule_lookup` → `itop_asset_lookup` → ES
-   queries → Cortex via MCP (most expensive, reserve for high-value IOCs only).
+   queries → `cortex_analyze` (most expensive, reserve for high-value IOCs only).
 3. **Skip common-infrastructure observables for Cortex:** `github.com`, `8.8.8.8`,
    Microsoft/Google CDN IPs, etc. → add to `investigation_gaps` as "skipped: common
    infrastructure".
@@ -506,19 +506,31 @@ FOCUS:  what does this NEW alert add to the existing case?
    context). Mark remaining budget unused. Do not waste calls.
 5. If a tool fails → fix parameters and retry ONCE, then mark as gap.
 
-### Cortex via cortex-mcp — when to invoke
+### Cortex integration — direct REST, not cortex-mcp (updated, supersedes earlier MCP plan)
 
-Agent 2 uses `cortex-mcp` (`solomonneas/cortex-mcp`) for selective on-demand Cortex
-analysis. This replaces the blanket Switch node approach in n8n.
+Cortex-mcp was built, source-reviewed, and integrated (`tools/cortex_mcp.py`,
+`langchain-mcp-adapters` over stdio transport) — then reverted. Root cause: the
+deployed `cortex-mcp` (`solomonneas/cortex-mcp`) hardcodes `StdioServerTransport`
+with no HTTP/SSE mode, and stdio transport requires the *client* to spawn the MCP
+server as a **local child process**. `agent-service` runs on 172.20.24.224;
+`cortex-mcp` is installed on 172.20.24.221. Stdio cannot cross VMs — there is no
+way to make this work without either running cortex-mcp's server logic on
+172.20.24.224 directly (defeating the point of a separate installation) or the
+cortex-mcp project adding a network transport, neither of which was in scope.
 
-Invoke Cortex via MCP when:
+Agent 2 instead calls `cortex_analyze` (`tools/cortex.py`, direct REST against
+Cortex at `CORTEX_URL`) selectively, based on its own reasoning — same selective-
+invocation goal as the original MCP plan (this replaces the blanket n8n Switch
+node approach either way), just without the MCP layer:
+
+Call `cortex_analyze` when:
 - A hash observable has NO existing report in the TheHive fetch (new hash, never seen)
 - An IP observable is from a non-well-known range and has no existing report
 - A URL observable has no existing report and the domain is not well-known
 - The investigation profile indicates TI enrichment is critical (network_threat,
   malicious_file)
 
-Do NOT invoke Cortex via MCP when:
+Do NOT call `cortex_analyze` when:
 - The observable already has a completed Cortex report from the TheHive fetch
 - The observable is clearly common infrastructure (github.com, 8.8.8.8, etc.)
 - Budget is nearly exhausted (< 2 calls remaining) and other evidence is sufficient
@@ -527,10 +539,10 @@ Do NOT invoke Cortex via MCP when:
 
 | Profile | Source engine | Priority tools | Avoid |
 |---------|--------------|---------------|-------|
-| `network_threat` | Suricata | cortex-mcp (IPs/domains), itop, ES (connections) | process/user queries |
-| `endpoint_behavior` | Sigma + process | sigma_rule_lookup, ES (process history), cortex-mcp (hashes), itop | network flows |
-| `malicious_file` | YARA/Strelka | cortex-mcp (ALL hash types), ES (Zeek session origin), itop | process ancestry, user auth |
-| `network_anomaly` | Sigma + network | sigma_rule_lookup, cortex-mcp (IPs/domains), itop | — |
+| `network_threat` | Suricata | cortex_analyze (IPs/domains), itop, ES (connections) | process/user queries |
+| `endpoint_behavior` | Sigma + process | sigma_rule_lookup, ES (process history), cortex_analyze (hashes), itop | network flows |
+| `malicious_file` | YARA/Strelka | cortex_analyze (ALL hash types), ES (Zeek session origin), itop | process ancestry, user auth |
+| `network_anomaly` | Sigma + network | sigma_rule_lookup, cortex_analyze (IPs/domains), itop | — |
 | `log_anomaly` | Sigma, no net/proc | sigma_rule_lookup, ES (user/entity history), itop | — |
 | `generic` | unknown | all tools | — |
 
@@ -542,7 +554,7 @@ schema. The agent MUST output valid JSON as its final message.
 On JSON parse failure:
 1. Extract evidence from tool-call trace: bucket each tool result into the right field
    (`sigma_rule_lookup` → `rule_context`, `itop_asset_lookup` → `asset_context`,
-   `cortex-mcp` results → `threat_intel`, ES queries → `temporal_context`,
+   `cortex_analyze` results → `threat_intel`, ES queries → `temporal_context`,
    `qdrant_retrieve` + `thehive_search` → `historical_context`)
 2. If trace extraction also fails → return `EvidencePackage` with
    `investigation_gaps=["agent output parse failure"]`
@@ -556,7 +568,7 @@ On JSON parse failure:
 | `thehive_search` | `tools/thehive.py` (REST direct) | open + closed case history |
 | `sigma_rule_lookup` | `tools/sigma_rules.py` (filesystem) | reads /opt/so/rules/sigma/ |
 | `qdrant_retrieve` | `tools/qdrant.py` | MITRE, CVE, playbook retrieval |
-| `cortex_analyze` | `tools/cortex_mcp.py` (cortex-mcp) | selective IOC analysis |
+| `cortex_analyze` | `tools/cortex.py` (direct REST) | selective IOC analysis — cortex-mcp reverted, see above |
 
 ---
 
@@ -745,30 +757,42 @@ observables are fetched as two separate array-form queries and merged in
 production, it stays as-is; do not migrate to `thehive4py` without a concrete
 reason (the earlier plan to use it was aspirational, not verified).
 
-### `tools/cortex_mcp.py` — Cortex MCP (solomonneas/cortex-mcp)
+### `tools/cortex_mcp.py` — REVERTED, do not rebuild without a transport fix
+
+`tools/cortex_mcp.py` was built, source-reviewed (clean: auth from env vars only
+and never logged, no observable data written to console/disk, graceful top-level
+catch on failure, no filesystem writes), integrated into `nodes/investigate.py`,
+and then reverted in the same session. Root cause: `solomonneas/cortex-mcp`
+hardcodes `StdioServerTransport` — no HTTP or SSE mode exists in its source.
+Stdio transport requires the calling process to spawn the MCP server as a local
+child process, which is impossible across a network boundary. `agent-service`
+runs on 172.20.24.224; the cortex-mcp install is on 172.20.24.221. This is a hard
+infrastructure constraint, not a configuration issue — do not re-attempt this
+integration unless one of these changes: cortex-mcp gains a network transport
+upstream, or agent-service is redeployed onto 172.20.24.221 itself.
+
+**Cortex TI is provided by `tools/cortex.py` instead** — see that entry below.
+Agent 2 still invokes it selectively (same goal the MCP plan had), just over
+direct REST rather than through an MCP layer.
+
+### `tools/cortex.py` — Cortex direct REST (requests)
 
 ```python
-analyze_observable(
-    observable_type: str,  # ip | domain | url | hash | mail
-    observable_value: str,
-    tlp: int = 2,
-    pap: int = 2
-) -> dict
-    """Run ALL applicable Cortex analyzers via MCP. Returns aggregated taxonomy.
-    Use selectively — only for high-value IOCs not already analyzed."""
+analyze_observable(observable_type: str, observable_value: str, timeout: int = 180) -> dict
+    """Run the best available Cortex analyzer against an observable and return a
+    verdict. Never raises — any failure (bad type, no analyzer, network error,
+    timeout) comes back as a dict with verdict "unknown" and the problem in
+    "details"."""
 ```
 
-**Implementation:** wraps the `cortex-mcp` MCP server via `langchain-mcp-adapters`
-`MultiServerMCPClient`. The MCP server runs as a separate Node.js process.
+Picks an analyzer automatically (VirusTotal preferred, AbuseIPDB for IPs as a
+second choice, otherwise the first available analyzer for the observable type),
+submits the job, polls `waitreport`, and reduces the resulting taxonomies to a
+single `{verdict, score, details, analyzer}` via worst-level-wins. Exposed to
+Agent 2 as the `cortex_analyze` tool. This is now the **only** Cortex path — see
+the `tools/cortex_mcp.py` entry above for why the MCP alternative was reverted.
 
-**IMPORTANT before deploying:** Review `solomonneas/cortex-mcp` source code to verify:
-- How authentication tokens are handled
-- Whether observable data is logged
-- Failure behavior on Cortex timeout or job failure
-
-```
-CORTEX_MCP_URL=http://localhost:3001   # or stdio transport
-```
+**Auth:** Bearer token via `CORTEX_API_KEY`.
 
 ### `tools/elasticsearch.py` — Elasticsearch direct (elasticsearch-py)
 
@@ -1140,7 +1164,7 @@ re-reading the rationale in `architecture-revision-v2.md`.
 | **Vector DB / RAG** | Qdrant (keep) | Already deployed at 172.20.24.224:6333, 2,412 points ingested in a single `triage_kb` collection with a `collection` discriminator field. Embeddings are `BAAI/bge-m3` (1024-dim) via raw `sentence-transformers` (verified empirically — the deployed vectors don't match any fastembed-supported model). No production ES cluster risk. Migrate to ES later if hybrid retrieval proves necessary. |
 | **Telemetry queries** | Elasticsearch direct (`elasticsearch-py`) | Security Onion's ES at 172.20.24.58. Read-only API key. Port 9200 firewall rule required. |
 | **TheHive access** | raw `requests` direct REST | Verified against the live 5.6.1 instance. Deterministic, no BETA risk. All reads and writes via direct API calls to `/api/v1/...`. (Earlier plan specified `thehive4py`; superseded — raw `requests` is what's tested and deployed.) |
-| **Cortex access** | `cortex-mcp` (solomonneas) via `langchain-mcp-adapters` | Selective analyzer invocation replacing blanket n8n Switch node. Reduces latency. Review source before deploying. |
+| **Cortex access** | `tools/cortex.py`, direct REST (`requests`) | Selective analyzer invocation replacing blanket n8n Switch node, driven by Agent 2's own reasoning. `cortex-mcp` (solomonneas) was built, source-reviewed, and integrated, then reverted: it hardcodes stdio transport with no HTTP/SSE mode, and agent-service (172.20.24.224) and cortex-mcp (172.20.24.221) are on different VMs — stdio can't cross that boundary. See §11's `tools/cortex_mcp.py` entry. |
 | **iTop access** | `requests` direct (JSON-RPC) | No alternative client. Existing `tools/itop.py` works. |
 | **Sigma rules** | Filesystem (`pyyaml`) | Local read from `/opt/so/rules/sigma/`. Existing `tools/sigma_rules.py` works. |
 | **Case management writes** | `thehive4py` direct | Deterministic, auditable. TheHive MCP `manage-entities` considered but rejected: BETA, prompt-injection risk, requires TheHive 5.5+. |
@@ -1156,6 +1180,7 @@ re-reading the rationale in `architecture-revision-v2.md`.
 | `llama3.2:3b` (current `.env`) | Replaced | 3B too small for reliable multi-step tool calling and structured JSON output across 3 agents. |
 | 2-agent merged architecture | Not needed | Qwen3 30B-A3B on 64GB RAM supports full 3-agent architecture. |
 | Elasticsearch MCP for telemetry | Not needed | Direct `elasticsearch-py` is simpler for deterministic Query DSL queries. MCP adds infrastructure without benefit for single-consumer agent. |
+| `cortex-mcp` for Cortex TI (Phase 4) | Reverted after implementation | Built, source-reviewed, and integrated — then reverted. `solomonneas/cortex-mcp` hardcodes `StdioServerTransport`, no HTTP/SSE mode. Stdio requires spawning the server as a local child process; agent-service (172.20.24.224) and cortex-mcp (172.20.24.221) are on different VMs. Not a config fix — a hard transport/topology mismatch. Reverted to direct REST (`tools/cortex.py`), same selective-invocation behavior. |
 
 ---
 
@@ -1220,7 +1245,7 @@ agent-service/
 │   │
 │   ├── investigate.py            ← EXISTS, needs structured output fix
 │   │     Agent 2 ReAct loop
-│   │     Adds cortex-mcp tool
+│   │     Uses cortex_analyze (direct REST) selectively — no cortex-mcp, see §11
 │   │     Removes raw elasticsearch calls (uses tools/elasticsearch.py directly)
 │   │     Enforces structured JSON output
 │   │
@@ -1238,8 +1263,10 @@ agent-service/
 ├── tools/
 │   ├── __init__.py
 │   ├── thehive.py                ← EXISTS, add get_full_alert_with_analysis()
-│   ├── cortex_mcp.py             ← NEW, wraps solomonneas/cortex-mcp via MCP
-│   ├── cortex.py                 ← EXISTS (old direct REST), keep as fallback
+│   ├── cortex.py                 ← EXISTS, direct REST — the only Cortex path
+│   │                                (cortex_mcp.py was built + reverted, see §11:
+│   │                                 stdio transport can't cross the agent-service/
+│   │                                 cortex-mcp VM boundary)
 │   ├── itop.py                   ← EXISTS, no changes needed
 │   ├── elasticsearch.py          ← EXISTS, keep (no MCP replacement)
 │   ├── sigma_rules.py            ← EXISTS, no changes needed
@@ -1253,7 +1280,6 @@ agent-service/
 │   │
 │   ├── investigator.py           ← EXISTS, update output schema
 │   │     Add EvidencePackage / DeltaEvidence JSON schema to prompt
-│   │     Add cortex-mcp tool description
 │   │     Remove qdrant_retrieve reference to old Cortex tool
 │   │
 │   └── analyst.py                ← EXISTS, add mitre_mapping validation instruction
@@ -1297,9 +1323,6 @@ QDRANT_URL=http://172.20.24.224:6333
 # Required for Sigma rule lookup
 SIGMA_RULES_PATH=/opt/so/rules/sigma
 
-# New — Cortex MCP server
-CORTEX_MCP_URL=http://172.20.24.221:3001   # or use stdio transport
-
 # Optional
 LLM_API_KEY=sk-no-auth            # Ollama doesn't need one but LangChain requires it
 ES_API_KEY=<base64-key>
@@ -1335,12 +1358,20 @@ Research validation: AgentSOC uses a dedicated Perception Layer for normalizatio
 CORTEX uses a behavior-analysis agent for correlation. Every modern SOC triage
 framework uses LLM reasoning for these tasks.
 
-### Decision 2: Cortex via cortex-mcp, not n8n Switch node
+### Decision 2: Selective Cortex invocation by Agent 2, not n8n Switch node
 
 **Why:** Confirmed operational pain point — blanket analyzer triggering adds latency
-and wastes quota on low-value observables (github.com, common domains). Agent 2 with
-cortex-mcp invokes Cortex selectively based on observable priority and context. A
-static Switch node cannot reason about whether an observable is worth analyzing.
+and wastes quota on low-value observables (github.com, common domains). Agent 2
+invokes Cortex selectively based on observable priority and context. A static
+Switch node cannot reason about whether an observable is worth analyzing.
+
+**Updated:** the original plan routed this through `cortex-mcp` for selective
+invocation. That was built, source-reviewed, and integrated, then reverted —
+`cortex-mcp` hardcodes stdio transport, which can't cross the VM boundary between
+agent-service (172.20.24.224) and cortex-mcp (172.20.24.221). The selective-
+invocation *goal* stands; it's implemented via Agent 2 calling `cortex_analyze`
+(direct REST, `tools/cortex.py`) selectively instead. See §11's `tools/cortex_mcp.py`
+entry for the full root-cause writeup.
 
 ### Decision 3: Qdrant stays, ES not used for knowledge base
 
@@ -1425,11 +1456,13 @@ PHASE 3 — Agent 1 (perceive.py)
   Update graph.py: replace correlate node with gate0 + perceive nodes
   Test: 10 real alerts, check CanonicalAlert quality + MITRE mapping accuracy
 
-PHASE 4 — Cortex MCP integration
-  Build tools/cortex_mcp.py wrapping solomonneas/cortex-mcp
-    (review source first for security)
-  Add cortex_mcp tool to nodes/investigate.py tool list
-  Update investigation profiles to prefer cortex_mcp over old cortex.py
+PHASE 4 — Cortex integration (DONE — cortex-mcp attempted and reverted)
+  Built tools/cortex_mcp.py wrapping solomonneas/cortex-mcp (source reviewed first)
+  Added cortex-mcp tools to nodes/investigate.py tool list
+  Discovered: cortex-mcp hardcodes stdio transport, agent-service (172.20.24.224)
+    and cortex-mcp (172.20.24.221) are on different VMs — stdio can't cross that
+  Reverted: removed tools/cortex_mcp.py, restored tools/cortex.py (direct REST)
+    as Agent 2's Cortex path, same selective-invocation behavior
   Test: verify selective invocation (github.com skipped, rare hash analyzed)
 
 PHASE 5 — Agent 2 structured output

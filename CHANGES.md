@@ -5,7 +5,7 @@ Last updated: 2026-08-02
 - [x] Phase 1 — Bug fixes (already resolved by a prior uncommitted session — see below)
 - [x] Phase 2 — New input contract
 - [x] Phase 3 — Agent 1 (perceive.py)
-- [x] Phase 4 — Cortex MCP integration
+- [x] Phase 4 — Cortex integration (attempted via cortex-mcp, reverted to direct REST — see below)
 - [ ] Phase 5 — Agent 2 structured output
 - [ ] Phase 6 — Agent 3 two-pass MITRE
 - [ ] Phase 7 — Format output fixes + end-to-end
@@ -32,6 +32,34 @@ listed bugs and the 7th never applied to the current code shape:
 
 71/71 tests passed before any Phase 2 work started. No Phase 1 code changes were made.
 
+## Phase 4 — built, then reverted (cortex-mcp)
+
+Phase 4 was implemented in full (`tools/cortex_mcp.py`, 3 tools wired into
+`nodes/investigate.py` via `tools/registry.py`, prompt updates, 14 tests, 93/93
+green) against a stdio-transport MCP server. The user then reported a hard
+infrastructure finding: `cortex-mcp` hardcodes `StdioServerTransport` (no HTTP/SSE
+mode), and `agent-service` runs on 172.20.24.224 while `cortex-mcp` is installed
+on 172.20.24.221 — stdio transport requires spawning the server as a **local**
+child process, which cannot cross that VM boundary. This isn't a configuration
+problem; it's a hard incompatibility between the deployed topology and the only
+transport `cortex-mcp` supports.
+
+Reverted in full: deleted `tools/cortex_mcp.py` and `tests/test_cortex_mcp.py`,
+restored `tools/registry.py`/`prompts/investigator.py` to their pre-Phase-4
+state (`cortex_analyze` as the sole, direct-REST Cortex tool), removed the
+`CORTEX_MCP_*` settings from `config.py`, removed `langchain-mcp-adapters`/`mcp<2.0`
+from `requirements.txt` and uninstalled them from the environment.
+`SOC-3s-ARCHITECTURE-v2.md` updated throughout (§7, §11, §14, §15, §17 Decision 2,
+§19 Phase 4) to document the revert and root cause rather than presenting
+cortex-mcp as live or planned — this is the kind of finding worth keeping visible
+in the architecture doc, not just this log, so a future session doesn't
+re-attempt the same integration without knowing why it failed.
+
+Net effect: Agent 2's selective-invocation goal (only analyze new/high-value
+observables, skip common infrastructure, don't re-analyze what TheHive already
+has) is unchanged — it's just implemented via `cortex_analyze` direct REST calls
+instead of an MCP layer. Test count returned to 79 (the Phase 3 baseline).
+
 ## Files modified
 | File | Change summary | Phase |
 |------|---------------|-------|
@@ -40,10 +68,7 @@ listed bugs and the 7th never applied to the current code shape:
 | SOC-3s-ARCHITECTURE-v2.md | §11 and §14 corrected: TheHive access is raw `requests` (not `thehive4py`), verified against live 5.6.1; Qdrant embedding is `BAAI/bge-m3` via raw `sentence-transformers` in one `triage_kb` collection with a `collection` discriminator (not `fastembed` + 3 collections). User confirmed: code wins, doc updated to match. | 2 |
 | graph.py | Replaced the single `correlate` node with `gate0` (dedup, pure Python) → `perceive` (Agent 1, LLM), per §13's shape. Routing: `gate0` → `format_output` on dedup hit, else `perceive`; `perceive` → `format_output` on dedup, else `investigate`. | 3 |
 | tests/test_graph.py | Rewrote route tests for `_route_after_gate0`/`_route_after_perceive` (was `_route_after_correlate`); `test_graph_nodes` now checks for `gate0`/`perceive` instead of `correlate` | 3 |
-| config.py | Added `cortex_mcp_command`/`cortex_mcp_args`/`cortex_mcp_cortex_url` settings (all optional, empty-string default — cortex-mcp is disabled, not a startup failure, when unset) + module-level exports + diagnostic printout | 4 |
-| tools/registry.py | Added 3 new `@tool`-wrapped functions (`cortex_list_analyzers`, `cortex_run_analyzer_by_name`, `cortex_wait_and_get_report`) to `TOOLS`; updated `cortex_analyze`'s docstring to mark it as the fallback, not the preferred path | 4 |
-| prompts/investigator.py | Documented the 3 new tools and the submit→wait two-step pattern as an explicit discipline rule (a Cortex job costs 2 tool calls, not 1); updated all TI-relevant profile blocks (`network_threat`, `endpoint_behavior`, `malicious_file`, `network_anomaly`) to prefer the cortex-mcp 3-tool sequence over `cortex_analyze` | 4 |
-| requirements.txt | Added `langchain-mcp-adapters` and `mcp<2.0` — pinned below 2.0 because `mcp` 2.0.0 (released today) broke `langchain-mcp-adapters` 0.3.1's import of `RequestContext` from `mcp.shared.context`; discovered and fixed during this session, see Known issues. | 4 |
+| prompts/investigator.py | Net change after Phase 4 build + revert: retained 2 discipline rules (check existing `cortex_results` before calling `cortex_analyze`; skip common infrastructure) — everything cortex-mcp-specific (3-tool sequence, submit/wait pairing) was reverted along with the tool itself. Verified via `git diff` against the pre-Phase-4 commit: this is the only file with any net difference. | 4 |
 
 ## Files created
 | File | Purpose | Phase |
@@ -53,14 +78,14 @@ listed bugs and the 7th never applied to the current code shape:
 | prompts/perceiver.py | `build_prompt()` — Agent 1's system prompt: MITRE mapping + case correlation reasoning (entity match strength, kill-chain progression), 3-tool budget-4 ReAct loop, `{mitre_mapping, correlation_result}` JSON output contract. No `mode` parameter — Agent 1 *decides* mode, it doesn't receive it (the architecture doc's file-tree table says `build_prompt(mode)` for this file, but that's inconsistent with Agent 1's actual role per §6; built as `build_prompt()` instead). | 3 |
 | nodes/perceive.py | Replaces `nodes/correlate.py`. `gate0_dedup()` — pure Python Redis fingerprint check, ported verbatim from `correlate.py`. `perceive()` — Agent 1: a `create_react_agent` ReAct loop over `PERCEPTION_TOOLS` (`sigma_rule_lookup`, `qdrant_retrieve_mitre`, `thehive_open_cases`) producing `mitre_mapping` + `correlation_result`. On agent exception or unparseable JSON, falls back to `_fallback_deterministic()` — the same entity-match/kill-chain logic `correlate.py` used (ported, not imported, since `correlate.py` is retired), minus MITRE mapping (an empty list + a "fallback" reason is the safe degraded state, not a guess). Preserves the "every LLM-facing node has a non-LLM fallback" invariant. | 3 |
 | tests/test_perceive.py | 15 tests: ported kill-chain/tactic-index unit tests from `test_correlate.py`; `gate0_dedup` duplicate/no-duplicate/no-alert cases; `perceive()` with a mocked `create_react_agent` for new-mode and merge-mode JSON parsing, unparseable-JSON fallback, agent-`.invoke()`-exception fallback (mocking `.invoke()` to raise, not `create_react_agent()` itself — construction isn't try/except-wrapped, matching `investigate.py`'s existing pattern), already-deduplicated short-circuit, and missing-alert no-op | 3 |
-| tools/cortex_mcp.py | Wraps 3 confirmed cortex-mcp tools (`cortex_list_analyzers`, `cortex_run_analyzer_by_name`, `cortex_wait_and_get_report`) as plain sync functions via `MultiServerMCPClient` (stdio transport). Tool schemas are cached module-globally after the first `get_tools()` call to avoid re-listing on every invocation (each `.ainvoke()` still opens its own stdio session per cortex-mcp's documented "new session per tool call" behavior — this is inherent to the library, not something this code controls). `_run_async()` handles being called from inside FastAPI's already-running event loop (runs in a fresh thread) vs. a plain script/pytest context (calls `asyncio.run()` directly) — a naive `asyncio.run()` would crash with "cannot be called from a running event loop" when `/triage` invokes this synchronously from its `async def` handler. Never raises — returns `{"error": ...}` on any failure (unconfigured, tool not found, stdio crash), matching every other tool module's contract. | 4 |
-| tests/test_cortex_mcp.py | 12 tests, all mocking `MultiServerMCPClient` (no live cortex-mcp process — untested against the real server, see Known issues): connection config shape (stdio, split args, env), not-configured error path, correct tool name + kwargs for each of the 3 tools, schema caching across calls, unknown-tool-name error, exception-during-call error, and `_coerce_dict`'s dict/JSON-string/plain-string/text-content-block handling | 4 |
 
 ## Files deleted / renamed
 | Old name | New name / action | Reason |
 |----------|------------------|--------|
 | nodes/correlate.py | nodes/perceive.py | Role changed from pure-Python correlation to LLM-powered perception + correlation, per architecture §17 Decision 1 |
 | tests/test_correlate.py | tests/test_perceive.py | Follows the node rename; deterministic-logic tests ported over, LLM-path tests added |
+| tools/cortex_mcp.py | Deleted (Phase 4, built then reverted same session) | stdio transport can't cross the agent-service (172.20.24.224) / cortex-mcp (172.20.24.221) VM boundary — see the Phase 4 revert section above |
+| tests/test_cortex_mcp.py | Deleted (Phase 4, built then reverted same session) | Tested code that no longer exists |
 
 ## Placeholders requiring configuration
 None — no new external services were wired up this session.
@@ -78,14 +103,15 @@ None — no new external services were wired up this session.
 | cortex-mcp source review | Confirmed clean: auth from env vars only (never logged), no observable data written to console/disk, graceful top-level catch on failure, no filesystem writes anywhere in the source | 4 |
 | cortex-mcp tool spec | User provided exact tool names/schemas from source (analyzers.ts, jobs.ts): `cortex_list_analyzers(dataType?)`, `cortex_run_analyzer_by_name(analyzerName, dataType, data, tlp=2, pap=2)` → `{jobId, analyzerUsed}`, `cortex_wait_and_get_report(jobId, timeout?)`. Explicitly do NOT collapse into a single `analyze_observable()` wrapper — the two-step submit/wait pattern must be explicit tool calls so Agent 2 can reason about which observables to skip before committing budget. Skip `cortex_run_analyzer` (needs analyzer ID not name), `cortex_get_job`, `cortex_get_job_report`, `cortex_run_analyzer_file` — not needed. | 4 |
 | Normalization gap (perceive.py doesn't re-run LLM normalization on CanonicalAlert fields, §6 sub-task 2) | Option A — accept for now, document as known gap | 3 |
-| Where does agent-service run relative to 172.20.24.221 (stdio transport needs to spawn `node` as a local child process, which only works if agent-service runs on the same host)? | Not directly answered — user proceeded with the confirmed tool spec and said start Phase 4, so treating stdio transport as viable in their deployment. Documented as an open assumption below rather than blocking. | 4 |
-| Proceed to Phase 4 | Yes — cortex-mcp integration into investigate.py | 4 |
+| Where does agent-service run relative to 172.20.24.221 (stdio transport needs to spawn `node` as a local child process, which only works if agent-service runs on the same host)? | Answered by the user's own follow-up infrastructure finding: agent-service is on 172.20.24.224, cortex-mcp is on 172.20.24.221 — different VMs. Root cause of the Phase 4 revert (see above). | 4 |
+| Proceed to Phase 4 | Yes — cortex-mcp integration into investigate.py (later reverted same session — see Phase 4 section above) | 4 |
+| cortex-mcp deployment topology finding | stdio-only (`StdioServerTransport` hardcoded, no HTTP mode), agent-service (172.20.24.224) and cortex-mcp (172.20.24.221) on different VMs — stdio cannot cross that boundary | 4 (revert) |
+| Revert decision | Remove `tools/cortex_mcp.py`, restore `tools/cortex.py`/direct REST as Agent 2's Cortex path, same selective-invocation behavior via Agent 2's own reasoning | 4 (revert) |
+| Proceed to Phase 5 | Yes — Agent 2 structured output | 5 |
 
 ## Questions pending user response
 | Question | Why needed | Blocking phase |
 |----------|-----------|----------------|
-| Confirm agent-service actually runs on 172.20.24.221 (or wherever `node /opt/cortex-mcp/dist/index.js` is reachable as a local child process) | stdio transport requires spawning the MCP server as a local subprocess — if agent-service runs elsewhere, every cortex-mcp tool call will fail at runtime (gracefully — returns `{"error": ...}` — but silently useless) | Not blocking code, but blocks cortex-mcp actually working in production |
-| Please add `CORTEX_MCP_COMMAND`, `CORTEX_MCP_ARGS`, `CORTEX_MCP_CORTEX_URL` to the real `.env` — confirmed via `grep` they're not there yet, despite being described as added | Same as above — code is ready, env isn't | Blocks live cortex-mcp use, not blocking code phases |
 | Has the agent-service IP been added to Security Onion's `elasticsearch_rest` firewall hostgroup? | ES queries will fail without it | Blocks live smoke testing, not blocking code phases |
 | Is `SIGMA_RULES_PATH=/opt/so/rules/sigma` actually mounted/reachable from where agent-service runs? | `sigma_rule_lookup` depends on it | Blocks live smoke testing, not blocking code phases |
 
@@ -98,10 +124,9 @@ None — no new external services were wired up this session.
 - [x] ~~cortex-mcp requires explicit source-review confirmation before Phase 4~~ — confirmed clean in Phase 4 (see Questions resolved).
 - [ ] `nodes/perceive.py`'s `perceive()` doesn't re-normalize `CanonicalAlert` fields (host/user/network/process) the way architecture §6 sub-task 2 describes — it takes `alert_builder.py`'s deterministic output as given and focuses on MITRE mapping + correlation (sub-tasks 3-6). **Accepted as a known gap per user decision (Option A)** — not planned for a near-term phase.
 - [ ] `test_perceive.py`'s LLM-path tests mock `create_react_agent` entirely (no real model call) — same limitation `investigate.py`/`analyze.py` already had (no LLM-in-the-loop test coverage exists anywhere in this suite). Real behavior against qwen3:30b-a3b hasn't been verified.
-- [ ] `mcp` 2.0.0 was released today (2026-08-02) and breaks `langchain-mcp-adapters` 0.3.1 (`ImportError: cannot import name 'RequestContext' from 'mcp.shared.context'`). Pinned `mcp<2.0` in `requirements.txt` (resolved to 1.29.0 in this environment). Revisit the pin once `langchain-mcp-adapters` publishes a `mcp` 2.0-compatible release.
-- [ ] `tools/cortex_mcp.py` is entirely untested against the real cortex-mcp server (mocked `MultiServerMCPClient` in all tests) — the tool response shape (dict vs JSON string vs text-content-blocks) is a best-effort guess at MCP's typical wire format, not verified against this specific server's actual output. First live investigation run against a real alert should be checked closely.
-- [ ] cortex-mcp's `.env` vars (`CORTEX_MCP_COMMAND`/`CORTEX_MCP_ARGS`/`CORTEX_MCP_CORTEX_URL`) are described as added but not actually present in the real `.env` (verified via `grep`) — code handles this gracefully (cortex-mcp tools return `{"error": "not configured"}`, `cortex_analyze` fallback still works), but cortex-mcp won't actually run until they're added.
-- [ ] Whether agent-service runs on the same host as cortex-mcp (172.20.24.221) — required for stdio transport to work — was not directly confirmed. Assuming it does per the decision to proceed with Phase 4.
+- [x] ~~`mcp` 2.0.0 breaks `langchain-mcp-adapters` 0.3.1~~ — moot: `mcp`/`langchain-mcp-adapters` uninstalled from the environment and removed from `requirements.txt` along with the rest of the cortex-mcp revert.
+- [x] ~~cortex-mcp's `.env` vars not actually present~~ — moot: cortex-mcp integration reverted, those vars are no longer used anywhere in the code.
+- [x] ~~Whether agent-service runs on the same host as cortex-mcp~~ — resolved: it doesn't (172.20.24.224 vs 172.20.24.221), which is exactly why Phase 4 was reverted.
 
 ## Test results
 | Phase | Tests run | Pass | Fail | Notes |
@@ -109,4 +134,5 @@ None — no new external services were wired up this session.
 | 1 (baseline) | `python3 -m pytest tests/ -q` | 71 | 0 | Before any code changes |
 | 2 | `python3 -m pytest tests/ -q` | 76 | 0 | +5 new tests in `test_alert_builder.py`; also re-ran `test.sh`'s syntax-check and import/route-registration checks manually (no `requirements-dev.txt` yet) — both passed |
 | 3 | `python3 -m pytest tests/ -q` | 79 | 0 | `test_correlate.py` (11 tests) retired, `test_perceive.py` (15 tests) added, `test_graph.py` rewritten (7 tests) — net +3. Syntax check, import check, and `graph.nodes` inspection (`gate0`, `perceive`, `investigate`, `analyze`, `format_output` all present) also passed manually. |
-| 4 | `python3 -m pytest tests/ -q` | 93 | 0 | +14 new tests in `test_cortex_mcp.py` (12) plus incidental coverage. Syntax check, import check, `tools.registry.TOOLS` listing (9 tools incl. all 3 new cortex-mcp ones), and `python3 config.py` printout also verified manually. `langchain-mcp-adapters` + `mcp==1.29.0` installed into the environment to make these imports/tests possible. |
+| 4 (build) | `python3 -m pytest tests/ -q` | 93 | 0 | +14 new tests in `test_cortex_mcp.py` (12) plus incidental coverage. `langchain-mcp-adapters` + `mcp==1.29.0` installed to make these imports/tests possible. |
+| 4 (revert) | `python3 -m pytest tests/ -q` | 79 | 0 | Back to the Phase 3 count — `test_cortex_mcp.py` deleted. `git diff` against the pre-Phase-4 commit confirms `config.py`/`tools/registry.py`/`requirements.txt` are byte-identical; `prompts/investigator.py` retains 2 intentional discipline-rule lines (see Files modified). `langchain-mcp-adapters`/`mcp` uninstalled from the environment. |

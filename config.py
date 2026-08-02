@@ -55,10 +55,6 @@ class Settings:
 
     sigma_rules_path: str = field(default_factory=lambda: os.environ.get("SIGMA_RULES_PATH", "/opt/so/rules/sigma"))
 
-    cortex_mcp_command: str = field(default_factory=lambda: os.environ.get("CORTEX_MCP_COMMAND", ""))
-    cortex_mcp_args: str = field(default_factory=lambda: os.environ.get("CORTEX_MCP_ARGS", ""))
-    cortex_mcp_cortex_url: str = field(default_factory=lambda: os.environ.get("CORTEX_MCP_CORTEX_URL", ""))
-
     max_tool_calls_new: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_NEW", "8")))
     max_tool_calls_merge: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_MERGE", "5")))
     dedup_window_seconds: int = field(default_factory=lambda: int(os.environ.get("DEDUP_WINDOW_SECONDS", "300")))
@@ -91,10 +87,6 @@ QDRANT_EMBEDDING_MODEL: str = settings.qdrant_embedding_model
 REDIS_URL: str | None = settings.redis_url
 
 SIGMA_RULES_PATH: str = settings.sigma_rules_path
-
-CORTEX_MCP_COMMAND: str = settings.cortex_mcp_command
-CORTEX_MCP_ARGS: str = settings.cortex_mcp_args
-CORTEX_MCP_CORTEX_URL: str = settings.cortex_mcp_cortex_url
 
 AGENT1_MAX_ITERATIONS_NEW: int = settings.max_tool_calls_new
 AGENT1_MAX_ITERATIONS_MERGE: int = settings.max_tool_calls_merge
@@ -142,11 +134,6 @@ if __name__ == "__main__":
 
     print("Sigma rules")
     print(f"  SIGMA_RULES_PATH     = {SIGMA_RULES_PATH}")
-
-    print("Cortex MCP")
-    print(f"  CORTEX_MCP_COMMAND   = {CORTEX_MCP_COMMAND if CORTEX_MCP_COMMAND else '(not set — cortex-mcp disabled)'}")
-    print(f"  CORTEX_MCP_ARGS      = {CORTEX_MCP_ARGS}")
-    print(f"  CORTEX_MCP_CORTEX_URL = {CORTEX_MCP_CORTEX_URL}")
 
     print("Tunables")
     print(f"  AGENT1_MAX_ITERATIONS_NEW   = {AGENT1_MAX_ITERATIONS_NEW}")

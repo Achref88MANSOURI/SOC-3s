@@ -3,9 +3,6 @@ from __future__ import annotations
 from langchain_core.tools import tool
 
 from tools.cortex import analyze_observable as _cortex_analyze
-from tools.cortex_mcp import list_analyzers as _cortex_mcp_list_analyzers
-from tools.cortex_mcp import run_analyzer_by_name as _cortex_mcp_run_analyzer_by_name
-from tools.cortex_mcp import wait_and_get_report as _cortex_mcp_wait_and_get_report
 from tools.elasticsearch import query_related_alerts, query_process_history, query_connection_history
 from tools.itop import lookup_asset as _itop_lookup
 from tools.qdrant import retrieve_mitre, retrieve_playbooks, retrieve_cve
@@ -15,39 +12,8 @@ from tools.thehive import search_open_cases, search_closed_cases, get_case_full
 
 @tool
 def cortex_analyze(observable_type: str, observable_value: str) -> dict:
-    """Fallback threat intel tool: runs the best available Cortex analyzer directly
-    (no cortex-mcp). Prefer cortex_list_analyzers / cortex_run_analyzer_by_name /
-    cortex_wait_and_get_report instead — they let you pick a specific analyzer and
-    reason about the job before committing tool budget. Use this only if cortex-mcp
-    is unavailable."""
+    """Run threat intelligence on an observable (ip, domain, url, hash). Returns verdict with score."""
     return _cortex_analyze(observable_type, observable_value)
-
-
-@tool
-def cortex_list_analyzers(data_type: str = "") -> dict:
-    """List Cortex analyzers available via cortex-mcp for a given observable dataType
-    (ip|domain|url|fqdn|hash|mail|filename|registry|regexp|other), or all analyzers
-    if data_type is omitted. Call this before cortex_run_analyzer_by_name if you
-    don't already know which analyzer to use for this observable type."""
-    return _cortex_mcp_list_analyzers(data_type or None)
-
-
-@tool
-def cortex_run_analyzer_by_name(analyzer_name: str, data_type: str, data: str, tlp: int = 2, pap: int = 2) -> dict:
-    """Submit a Cortex analyzer job via cortex-mcp for a NEW observable. Check the
-    alert's existing cortex_results first — do not re-analyze an observable that
-    already has a report. Skip common infrastructure (github.com, 8.8.8.8, major
-    CDNs) — not worth a job. data_type must be one of: ip|domain|url|fqdn|hash|mail|
-    filename|registry|regexp|other. Returns {jobId, analyzerUsed}: pass jobId to
-    cortex_wait_and_get_report next — always follow up, never leave a job unread."""
-    return _cortex_mcp_run_analyzer_by_name(analyzer_name, data_type, data, tlp, pap)
-
-
-@tool
-def cortex_wait_and_get_report(job_id: str, timeout: int = 180) -> dict:
-    """Wait for a Cortex job (the jobId returned by cortex_run_analyzer_by_name) to
-    finish and return its full report with verdict taxonomies, in one call."""
-    return _cortex_mcp_wait_and_get_report(job_id, timeout)
 
 
 @tool
@@ -136,9 +102,6 @@ def thehive_open_cases(observables: str = "", host: str = "", user: str = "") ->
 
 TOOLS = [
     cortex_analyze,
-    cortex_list_analyzers,
-    cortex_run_analyzer_by_name,
-    cortex_wait_and_get_report,
     itop_asset_lookup,
     elasticsearch_query,
     thehive_search,

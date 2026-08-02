@@ -12,5 +12,3 @@ fastembed
 sentence-transformers
 redis
 pyyaml
-langchain-mcp-adapters
-mcp<2.0
