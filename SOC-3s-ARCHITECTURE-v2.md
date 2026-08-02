@@ -1232,7 +1232,7 @@ agent-service/
 │     Required: CORTEX_URL, CORTEX_API_KEY, THEHIVE_URL, THEHIVE_API_KEY,
 │              ITOP_URL, ITOP_USER, ITOP_KEY, ES_URL, LLM_BASE_URL, LLM_MODEL
 │     Optional: ES_API_KEY, LLM_API_KEY, QDRANT_URL, REDIS_URL,
-│              SIGMA_RULES_PATH, CORTEX_MCP_URL,
+│              SIGMA_RULES_PATH,
 │              MAX_TOOL_CALLS_NEW (default 8),
 │              MAX_TOOL_CALLS_MERGE (default 5),
 │              DEDUP_WINDOW_SECONDS (default 300)
@@ -1251,8 +1251,8 @@ agent-service/
 │
 ├── requirements.txt
 │     fastapi, uvicorn, langgraph, langchain, langchain-openai
-│     langchain-mcp-adapters, pydantic, requests, python-dotenv
-│     elasticsearch, qdrant-client[fastembed], thehive4py
+│     pydantic, requests, python-dotenv
+│     elasticsearch, qdrant-client[fastembed]
 │     redis, pyyaml, httpx
 │
 ├── .env                          (gitignored)
@@ -1312,7 +1312,6 @@ agent-service/
     ├── test_schemas.py           update for new models
     ├── test_graph.py             update for perceive node rename
     ├── test_perceive.py          ← NEW
-    ├── test_correlate.py         ← RETIRE or repurpose
     ├── test_format_output.py     update for action string fix
     ├── test_analyze.py           update for mitre_mapping two-pass
     ├── test_alert_builder.py     ← NEW, test observable type correction
@@ -1467,15 +1466,27 @@ PHASE 2 — New input contract
   Update main.py to accept AlertWebhookPayload
   Test: POST /triage with real n8n sample payload, confirm CanonicalAlert built
 
-PHASE 3 — Agent 1 (perceive.py)
-  Rename nodes/correlate.py → nodes/perceive.py
-  Keep gate0_dedup() as pure Python Redis check
-  Build perceive() LLM agent (6 sub-tasks)
-  Create prompts/perceiver.py with {mitre_mapping, correlation_result} output
-    schema — written directly into TriageState's flat fields, not a bundled
-    output object
-  Update graph.py: replace correlate node with gate0 + perceive nodes
-  Test: 10 real alerts, check CanonicalAlert quality + MITRE mapping accuracy
+PHASE 3 — Agent 1 (perceive.py) (DONE)
+  Renamed nodes/correlate.py → nodes/perceive.py
+  Kept gate0_dedup() as a pure Python Redis fingerprint check, ported verbatim
+    from correlate.py
+  Built perceive(): a create_react_agent ReAct loop over PERCEPTION_TOOLS
+    (sigma_rule_lookup, qdrant_retrieve_mitre, thehive_open_cases, budget 4
+    tool calls) producing mitre_mapping + correlation_result. On agent
+    exception or unparseable JSON, falls back to the same deterministic
+    entity-match/kill-chain logic correlate.py used (minus MITRE mapping,
+    which genuinely needs the LLM)
+  Created prompts/perceiver.py with the {mitre_mapping, correlation_result}
+    output schema — written directly into TriageState's flat fields, not a
+    bundled output object (no PerceptionResult; that model was added then
+    later removed as dead code — see CHANGES.md)
+  Updated graph.py: replaced the correlate node with gate0 + perceive nodes
+  Does NOT perform sub-task 2's full LLM-driven CanonicalAlert
+    re-normalization (host/user/network/process) — accepted as a known gap
+    per user decision (Option A), documented in CHANGES.md
+  Test: unit tests only (tests/test_perceive.py, mocked create_react_agent) —
+    the "10 real alerts" live validation this line originally called for
+    was never run; no live LLM/TheHive/Qdrant reachable from this session
 
 PHASE 4 — Cortex integration (DONE — cortex-mcp attempted and reverted)
   Built tools/cortex_mcp.py wrapping solomonneas/cortex-mcp (source reviewed first)

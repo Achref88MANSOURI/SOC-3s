@@ -509,44 +509,69 @@ session-brief document, containing one incidental mention inside an
 illustrative example table — not something this session authors or
 maintains).
 
-### §15 quick pass — other file tree entries that don't match disk (flagged, not fixed)
+### §15 quick pass — other file tree entries that don't match disk
 
-Per instruction: found, listed here, **not corrected**.
+Originally flagged, not fixed. **Follow-up commit ("final targeted doc fix")
+fixed the actively misleading ones** — entries that asserted something false
+(a removed dependency still listed as present, a deleted file still shown as
+existing). Entries that are merely **incomplete** (missing items, stale "needs
+fixing" notes describing work that's since been done) were explicitly left
+as-is per the user's instruction — incomplete isn't the same defect as wrong.
 
-- `config.py` entry: `Optional:` list still includes `CORTEX_MCP_URL` (removed
-  in the Phase 4 revert) and omits `QDRANT_COLLECTION`/`QDRANT_EMBEDDING_MODEL`
-  (both real settings, added in earlier phases).
-- `schemas.py` entry: still lists `TriageRequest`, `ExistingCaseContext`,
-  `Literal type aliases: Likelihood, Impact, Severity`, and
-  `ToolCallLogEntry = InvestigationTraceEntry (alias)` — all four confirmed
-  not to exist in code back in §12's cleanup, but §15's copy wasn't updated
-  to match.
-- `requirements.txt` entry: still lists `langchain-mcp-adapters` (removed in
+**Fixed:**
+- [x] `config.py` entry's `Optional:` list — removed `CORTEX_MCP_URL` (gone
+  since the Phase 4 revert).
+- [x] `requirements.txt` entry — removed `langchain-mcp-adapters` (gone since
   the Phase 4 revert) and `thehive4py` (never actually used — raw `requests`
-  throughout); doesn't list `sentence-transformers` (the actual Qdrant
-  embedding dependency).
-- `nodes/investigate.py` entry: says "needs structured output fix" — that was
-  already true before Phase 1 even started, not a live TODO.
-- `nodes/format_output.py` entry: lists two "fixes needed" that were already
-  resolved before this session began (§18 bugs 3/4).
-- `prompts/perceiver.py` entry: the comment "replaces investigator.py for
-  Agent 1" is wrong — `investigator.py` still exists and serves Agent 2;
-  `perceiver.py` didn't replace it, it's a new file for a new agent. Also
-  still shows `build_prompt(mode)` — wrong signature, actual is
-  `build_prompt()` with no arguments (a discrepancy already noted back in
-  Phase 3's section of this log, but never corrected in §15 itself).
-- `prompts/analyst.py` entry: "add mitre_mapping validation instruction" —
-  already done, in Phase 6.
-- `tests/` section: doesn't list `test_investigate.py`, `test_case_action.py`,
-  `test_e2e.py`, `test_thehive.py`, or `test_qdrant.py` (all real files);
-  still shows `test_correlate.py ← RETIRE or repurpose` as if a pending
-  decision, when it was actually deleted back in Phase 3.
+  throughout).
+- [x] `tests/` section — removed the `test_correlate.py ← RETIRE or
+  repurpose` line; the file was actually deleted back in Phase 3, not left
+  pending a decision.
+- [x] §19 Phase 3 entry — marked `(DONE)` with an outcomes summary, matching
+  the style already used for Phases 4-10. Includes the honest note that its
+  original "test: 10 real alerts" line was never actually run (unit tests
+  only, mocked LLM — no live LLM/TheHive/Qdrant reachable from this session).
 
-This reinforces Phase 10's finding: §15 is stale throughout and shouldn't be
-trusted as a source of truth for "what's done" — §19 is (mostly — see the
-Phase 3 gap below).
+**Deferred, left as-is (incomplete, not wrong):**
+- [ ] `config.py` entry omits `QDRANT_COLLECTION`/`QDRANT_EMBEDDING_MODEL`
+  (both real settings).
+- [ ] `schemas.py` entry still lists `TriageRequest`, `ExistingCaseContext`,
+  the `Impact`/`Likelihood`/`Severity` Literal aliases, and `ToolCallLogEntry`
+  — none exist in code (confirmed back in §12's cleanup) but §15's copy of
+  this list wasn't touched.
+- [ ] `requirements.txt` entry doesn't list `sentence-transformers` (the
+  actual Qdrant embedding dependency).
+- [ ] `nodes/investigate.py` entry says "needs structured output fix" — true
+  before Phase 1 even started, stale phrasing rather than a live TODO.
+- [ ] `nodes/format_output.py` entry lists two "fixes needed" already
+  resolved before this session began (§18 bugs 3/4).
+- [ ] `prompts/perceiver.py` entry's comment "replaces investigator.py for
+  Agent 1" is wrong (`investigator.py` still exists, still serves Agent 2)
+  and its `build_prompt(mode)` signature doesn't match the real
+  `build_prompt()` (no args) — noted back in Phase 3's section of this log,
+  never corrected in §15.
+- [ ] `prompts/analyst.py` entry: "add mitre_mapping validation instruction"
+  — already done, in Phase 6.
+- [ ] `tests/` section still doesn't list `test_investigate.py`,
+  `test_case_action.py`, `test_e2e.py`, `test_thehive.py`, or
+  `test_qdrant.py` (all real files).
+
+§15 remains a mix of accurate-but-incomplete and now-mostly-not-actively-wrong
+— still don't treat it as a source of truth for "what's done"; §19 is that
+now that Phase 3 is marked `(DONE)` too.
 
 **One more finding, adjacent but real:** §19's Phase 3 entry was never marked
 `(DONE)` with a details summary the way Phases 4 through 10 were — an
-oversight from earlier in the session. Left as-is this commit (out of the
-explicitly given scope), noted here rather than silently fixed or ignored.
+oversight from earlier in the session. **Fixed in the follow-up "final
+targeted doc fix" commit** — see the §15 quick-pass section above.
+
+## Final targeted doc fix (last doc cleanup before Tier 0)
+
+Documentation only, single commit. Fixed only the actively misleading §15
+entries flagged in the prior commit (a removed dependency shown as present, a
+deleted test file shown as existing) — not the whole file tree. Also marked
+§19's Phase 3 entry `(DONE)`, closing the last item from the prior commit's
+findings. See the "Fixed" / "Deferred" split in the §15 quick-pass section
+above for exactly what changed and what's intentionally still left incomplete.
+
+112/112 tests passing (no `.py` files touched).
