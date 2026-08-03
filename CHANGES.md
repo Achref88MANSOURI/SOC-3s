@@ -575,3 +575,55 @@ findings. See the "Fixed" / "Deferred" split in the §15 quick-pass section
 above for exactly what changed and what's intentionally still left incomplete.
 
 112/112 tests passing (no `.py` files touched).
+
+---
+
+# v3-final
+
+New session (2026-08-03), same worktree. `SOC-3s-ARCHITECTURE-v3-final.md` and
+`claude-code-v3-final-prompt-2.md` were added; the old `SOC-3s-ARCHITECTURE-v2.md`
+and `claude-code-session-prompt.md` had already been deleted by the user before
+this session started.
+
+## Reconciliation (before any code changes)
+
+**Finding, reported and resolved before touching anything:**
+`claude-code-v3-final-prompt-2.md` (300 lines) turned out to be byte-for-byte
+the same generic v2-era template as the very first session's
+`claude-code-session-prompt.md` — "Phase 1 bug fixes... Phase 10 Tests,"
+references to `ARCHITECTURE.md §18/§19`, `architecture-revision-v2.md`, the old
+cortex-mcp Phase 4 rules. Zero mentions of Suricata, Kibana, FP tracking, or
+Phases A-G. It is not a v3 task list despite its filename and the session's own
+framing of it as one. The actual Phase A-G build order (and the "Phase E
+deletion list" the session's opening instructions pointed at) only exists in
+`SOC-3s-ARCHITECTURE-v3-final.md` §13. Flagged to the user rather than guessed
+around. **User decision: delete the stale file, treat §13 as the authoritative
+task list.**
+
+**File inventory vs. §13 Phase E's "keep" list** (`ARCHITECTURE.md` i.e. the v3
+doc, `CHANGES.md`, `N8N-INTEGRATION.md`): everything else in the repo matched
+the prior session's end state (Phases 1-10 + doc cleanups) — no other
+superseded drafts, except one leftover: `CONTEXT.md.save` (a backup of the
+very first, pre-v2 architecture doc, never cleaned up across the whole prior
+session).
+
+**Kibana grep** (`grep -rli "kibana" --include="*.py" --include="*.md" .`):
+one file matched — `SOC-3s-ARCHITECTURE-v3-final.md` itself, and every hit is
+inside its own "tried and reverted" record (§1, §11's tool-inventory comment,
+§12's rejected-decisions table, §13's Phase F verification step) — documenting
+the decision *not* to use Kibana, not presenting it as live. Zero hits in any
+`.py` file (`tools/`, `nodes/`, `prompts/` all clean). Zero hits in
+`CHANGES.md` — Kibana was never part of this session's own history to begin
+with, so there was nothing to preserve there. No cleanup needed on this front.
+
+## Phase E — cleanup
+
+Deleted per §13 Phase E ("delete all superseded prompt/architecture drafts...
+keep: ARCHITECTURE.md, CHANGES.md, N8N-INTEGRATION.md") and the user's
+resolution of the prompt-file finding above:
+- `claude-code-v3-final-prompt-2.md` — stale v2-era template, not a real v3
+  task list (see reconciliation above)
+- `CONTEXT.md.save` — leftover backup of the original pre-v2 architecture doc
+
+112/112 tests passing (no `.py` files touched — this phase was deletions of
+two `.md`-adjacent files only).
