@@ -5,9 +5,10 @@ from langchain_core.tools import tool
 from tools.cortex import analyze_observable as _cortex_analyze
 from tools.detection_rules import get_rule_source as _detection_rule
 from tools.elasticsearch import query_related_alerts, query_process_history, query_connection_history
+from tools.fp_tracking import get_fp_signal as _get_fp_signal, thehive_fp_history as _thehive_fp_history
 from tools.itop import lookup_asset as _itop_lookup
 from tools.qdrant import retrieve_mitre, retrieve_playbooks, retrieve_cve
-from tools.thehive import search_open_cases, search_closed_cases
+from tools.thehive import search_open_cases, search_closed_cases, get_case_full as _get_case_full
 
 
 @tool
@@ -98,14 +99,48 @@ def thehive_open_cases(observables: str = "", host: str = "", user: str = "") ->
     return search_open_cases(observables=obs_list or None, host=host or None, user=user or None)
 
 
-# Per-agent tool lists (SOC-3s-ARCHITECTURE-v3-final.md §1/§6/§8/§13 Phase C):
-# no tool appears in both. Agent 1 (perceive) owns open-case correlation and
-# MITRE tag extraction; Agent 2 (investigate) owns closed-case history,
-# telemetry, and enrichment.
+@tool
+def get_case_full(case_id: str) -> dict:
+    """Fetch full content (description, severity, tags, metrics, custom fields,
+    summary) of a specific TheHive case by ID. Call this AFTER thehive_open_cases
+    finds a candidate case, to read its actual content before deciding merge vs
+    new — thehive_open_cases only returns a shallow list, not enough to reason
+    about match strength or kill-chain progression on its own."""
+    result = _get_case_full(case_id)
+    return result or {"found": False, "case_id": case_id}
+
+
+@tool
+def get_fp_signal(rule_uuid: str, host: str) -> dict:
+    """Check this rule/host combo's historical false-positive rate before
+    investigating further — instant, local, always call this FIRST. Returns
+    short_term (24h) and long_term (30d) fp_rate + total sample count for
+    each window. A high rate is a strong prior, not a verdict — it informs
+    confidence, it never auto-decides true/false positive on its own."""
+    return _get_fp_signal(rule_uuid, host)
+
+
+@tool
+def thehive_fp_history(rule_uuid: str, host: str, limit: int = 3) -> list:
+    """Pull the actual reasoning text behind past closures of this rule/host
+    combo from TheHive — only useful, and only actually queried, when
+    get_fp_signal showed a long_term_fp_rate > 0.5 with >= 5 samples (enough
+    to trust). Below that threshold this returns [] without touching TheHive,
+    so calling it speculatively costs nothing."""
+    return _thehive_fp_history(rule_uuid, host, limit)
+
+
+# Per-agent tool lists (SOC-3s-ARCHITECTURE-v3-final.md §1/§6/§7a/§8/§13 Phase
+# C/G): no tool appears in both. Agent 1 (perceive) owns open-case
+# correlation, MITRE tag extraction, and FP-history signal; Agent 2
+# (investigate) owns closed-case history, telemetry, and enrichment.
 PERCEPTION_TOOLS = [
+    get_fp_signal,
+    thehive_fp_history,
     detection_rule_lookup,
-    thehive_open_cases,
     qdrant_retrieve_mitre,
+    thehive_open_cases,
+    get_case_full,
 ]
 
 INVESTIGATION_TOOLS = [

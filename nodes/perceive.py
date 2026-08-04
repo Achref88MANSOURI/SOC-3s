@@ -25,7 +25,7 @@ _model = ChatOpenAI(
     temperature=0.0,
 )
 
-PERCEPTION_MAX_TOOL_CALLS = 4
+PERCEPTION_MAX_TOOL_CALLS = 6
 
 MITRE_TECHNIQUE_RE = re.compile(r"(?:attack\.)?(T\d{4})", re.IGNORECASE)
 

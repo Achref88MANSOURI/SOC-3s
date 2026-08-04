@@ -56,6 +56,8 @@ class Settings:
     sigma_rules_path: str = field(default_factory=lambda: os.environ.get("SIGMA_RULES_PATH", "/opt/so/rules/sigma"))
     suricata_rules_path: str = field(default_factory=lambda: os.environ.get("SURICATA_RULES_PATH", "/opt/so/rules/nids/suri/all.rules"))
 
+    fp_db_path: str = field(default_factory=lambda: os.environ.get("FP_DB_PATH", "./data/fp_events.db"))
+
     max_tool_calls_new: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_NEW", "8")))
     max_tool_calls_merge: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_MERGE", "5")))
     dedup_window_seconds: int = field(default_factory=lambda: int(os.environ.get("DEDUP_WINDOW_SECONDS", "300")))
@@ -89,6 +91,8 @@ REDIS_URL: str | None = settings.redis_url
 
 SIGMA_RULES_PATH: str = settings.sigma_rules_path
 SURICATA_RULES_PATH: str = settings.suricata_rules_path
+
+FP_DB_PATH: str = settings.fp_db_path
 
 AGENT1_MAX_ITERATIONS_NEW: int = settings.max_tool_calls_new
 AGENT1_MAX_ITERATIONS_MERGE: int = settings.max_tool_calls_merge
@@ -139,6 +143,9 @@ if __name__ == "__main__":
 
     print("Suricata rules")
     print(f"  SURICATA_RULES_PATH  = {SURICATA_RULES_PATH}")
+
+    print("FP tracking")
+    print(f"  FP_DB_PATH           = {FP_DB_PATH}")
 
     print("Tunables")
     print(f"  AGENT1_MAX_ITERATIONS_NEW   = {AGENT1_MAX_ITERATIONS_NEW}")

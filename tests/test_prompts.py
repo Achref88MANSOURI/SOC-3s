@@ -8,7 +8,40 @@ def test_investigator_build_prompt_new():
     prompt = build_investigator_prompt("network_threat", "new")
     assert "network_threat" in prompt
     assert "NEW alert" in prompt
-    assert "sigma_rule_lookup" in prompt
+    assert "thehive_search_closed" in prompt
+
+
+def test_investigator_prompt_has_no_agent1_exclusive_tools():
+    # sigma_rule_lookup/detection_rule_lookup, thehive_open_cases,
+    # qdrant_retrieve_mitre, get_case_full, get_fp_signal, and
+    # thehive_fp_history are all Agent 1 (perceive) exclusive as of Phase C/G
+    # (SOC-3s-ARCHITECTURE-v3-final.md §8: "No thehive_open_cases, no
+    # detection_rule_lookup, no qdrant_retrieve_mitre, no Kibana tool of any
+    # kind.") — Agent 2 must never be told it has these.
+    prompt = build_investigator_prompt("generic", "new")
+    for forbidden in (
+        "sigma_rule_lookup",
+        "detection_rule_lookup",
+        "thehive_open_cases",
+        "qdrant_retrieve_mitre",
+        "get_case_full",
+        "get_fp_signal",
+        "thehive_fp_history",
+        "kibana",
+    ):
+        assert forbidden not in prompt.lower()
+
+
+def test_investigator_prompt_has_cortex_discipline():
+    prompt = build_investigator_prompt("generic", "new")
+    assert "canonical_alert.cortex_results" in prompt
+    assert "github.com" in prompt
+
+
+def test_investigator_prompt_qdrant_cve_playbooks_only():
+    prompt = build_investigator_prompt("generic", "new")
+    assert "'cve' or 'playbooks'" in prompt or "cve" in prompt
+    assert "mitre_attack'/'mitre'" in prompt or "never" in prompt
 
 
 def test_investigator_build_prompt_merge():

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from tools.thehive import get_full_alert_with_analysis
+from tools.thehive import get_case_full, get_full_alert_with_analysis, search_fp_history
 
 
 def _alert_response():
@@ -65,3 +65,65 @@ def test_get_full_alert_with_analysis_alert_fetch_fails(mock_post):
     mock_post.side_effect = requests.exceptions.RequestException("connection refused")
     result = get_full_alert_with_analysis("~15401056")
     assert result is None
+
+
+@patch("tools.thehive._thehive_post")
+def test_search_fp_history_returns_ignored_alerts(mock_post):
+    mock_post.return_value = [
+        {"_id": "~1", "title": "Suspicious PowerShell", "summary": "Confirmed FP: admin script", "updatedAt": "2026-07-01"},
+    ]
+
+    result = search_fp_history("rule-uuid-1", "srv-01", limit=3)
+
+    assert len(result) == 1
+    assert result[0]["alert_id"] == "~1"
+    assert result[0]["comment"] == "Confirmed FP: admin script"
+    body = mock_post.call_args.args[1]
+    assert body["filter"] == [{"terms": {"status": ["Ignored"]}}]
+    assert body["size"] == 3
+
+
+def test_search_fp_history_missing_rule_or_host_returns_empty_without_query():
+    with patch("tools.thehive._thehive_post") as mock_post:
+        assert search_fp_history("", "srv-01") == []
+        assert search_fp_history("rule-1", "") == []
+        mock_post.assert_not_called()
+
+
+@patch("tools.thehive._thehive_post")
+def test_search_fp_history_request_failure_returns_empty(mock_post):
+    import requests
+
+    mock_post.side_effect = requests.exceptions.RequestException("timeout")
+    assert search_fp_history("rule-1", "srv-01") == []
+
+
+@patch("tools.thehive._thehive_get")
+def test_get_case_full_returns_case_details(mock_get):
+    mock_get.return_value = {
+        "_id": "~case-1",
+        "title": "Ransomware on srv-01",
+        "description": "d",
+        "severity": 3,
+        "status": "Open",
+        "tags": ["ransomware"],
+        "metrics": {},
+        "customFields": {},
+        "createdAt": "2026-07-01",
+        "owner": "analyst1",
+        "summary": "s",
+    }
+
+    result = get_case_full("~case-1")
+
+    assert result["case_id"] == "~case-1"
+    assert result["title"] == "Ransomware on srv-01"
+    assert result["severity"] == 3
+
+
+@patch("tools.thehive._thehive_get")
+def test_get_case_full_request_failure_returns_none(mock_get):
+    import requests
+
+    mock_get.side_effect = requests.exceptions.RequestException("not found")
+    assert get_case_full("~doesnotexist") is None

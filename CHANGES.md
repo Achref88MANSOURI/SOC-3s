@@ -885,3 +885,205 @@ list-shaped bucketing (which exposed the `_try_parse_json` bug above).
 place rather than added). Syntax check, import check, `main.py` route check,
 and the `PERCEPTION_TOOLS`/`INVESTIGATION_TOOLS` zero-overlap assertion all
 verified manually.
+
+## Phase C follow-up — get_case_full added to PERCEPTION_TOOLS
+
+Closes the discrepancy flagged at the end of Phase C. §11's tool inventory
+explicitly lists `get_case_full(case_id) # Agent 1, on merge` even though its
+own `PERCEPTION_TOOLS` code block in the same section only names 5 tools —
+an inconsistency inside the architecture doc itself. Resolved in favor of
+including it: `get_case_full` is now wrapped and registered, so Agent 1 can
+read a merge candidate's full content (description, severity, tags, metrics,
+custom fields, summary) after `thehive_open_cases` finds it, rather than
+deciding match strength and kill-chain progression from the shallow
+open-cases list alone.
+
+## Phase G (pulled forward ahead of Phase D) — FP history tracking
+
+Originally scheduled after Phase F, pulled forward because Phase D's prompt
+work (documenting Agent 1's tool set and call order) can't be written
+honestly without `get_fp_signal`/`thehive_fp_history` actually existing —
+writing prompt text for tools that don't exist yet would leave the prompt and
+the registered tool list out of sync the moment Phase D landed.
+
+**Scope correction before starting:** the Phase D task description this
+session was given named `get_fp_signal` as one of "5 PERCEPTION_TOOLS", but
+§7a and §13 of the architecture doc both independently scope Phase G as
+adding *two* tools to `PERCEPTION_TOOLS` — `get_fp_signal` (always-run) and
+`thehive_fp_history` (conditional) — making 6 total once `get_case_full` is
+included, not 5. Flagged and confirmed before building, per doc.
+
+**`tools/fp_tracking.py`** (new): SQLite-backed FP-history counter per §7a's
+design, grounded in AACT (Turcotte, Labrèche, Paquette — arXiv:2505.09843,
+2025)'s finding that recent-past triage decisions predict future ones — and
+critically, that this must be captured as **two separate time windows**, not
+one running total: short-term (24h, active-incident noise) and long-term
+(30d, chronic baseline noise like a scanner). A flat all-time counter erases
+exactly this distinction.
+
+- `fp_events` table (`rule_uuid`, `host`, `is_fp`, `triage_timestamp`,
+  `verdict_confidence`) with an index on `(rule_uuid, host, triage_timestamp)`,
+  schema-on-first-use via `CREATE TABLE IF NOT EXISTS` — no migration step,
+  no crash on a missing db file (first run creates it and the containing
+  directory).
+- `get_fp_signal(rule_uuid, host)` — always-run, local, no network call.
+  Returns `{short_term_fp_rate, short_term_total, long_term_fp_rate,
+  long_term_total}`. Gracefully returns all-zero on missing rule_uuid/host
+  rather than erroring.
+- `thehive_fp_history(rule_uuid, host, limit=3)` — the conditional TheHive
+  query for the actual past-closure reasoning text. §7a's pseudocode frames
+  the `long_term_fp_rate > 0.5 AND long_term_total >= 5` threshold as
+  something the calling agent checks before deciding to call this — but it's
+  gated **in code** here instead (calls `get_fp_signal` internally first,
+  returns `[]` without touching TheHive if the threshold isn't met), matching
+  this repo's established pattern of enforcing safety/cost guardrails
+  defensively rather than trusting the LLM to always follow prompt
+  instructions. Makes the gate unit-testable independent of any LLM.
+- `record_triage_outcome(rule_uuid, host, is_fp, verdict_confidence)` — one
+  row per completed triage. `TriageVerdict` has no single top-level
+  confidence field (only per-MITRE-mapping `confidence`), so
+  `verdict.likelihood` (unlikely/possible/likely/near_certain — Agent 3's own
+  stated confidence in its verdict) is used as the `verdict_confidence`
+  proxy, documented in the docstring rather than silently assumed.
+
+**`tools/thehive.py`**: added `search_fp_history(rule_uuid, host, limit=3)`,
+following the existing `search_closed_cases` request pattern but filtering
+TheHive alerts (not cases) on `status: ["Ignored"]` — confirmed elsewhere in
+this doc as the real FP-close status (`"FP"` does not exist on live TheHive
+5.6.1). Also added `get_case_full` to this module's public import surface
+used by `tools/registry.py` (function itself pre-existed from an earlier
+phase, just wasn't wrapped as an agent tool until now).
+
+**`config.py`**: `FP_DB_PATH` setting, default `./data/fp_events.db`,
+overridable via env var — same pattern as `SIGMA_RULES_PATH`/
+`SURICATA_RULES_PATH`. **`.gitignore`**: added `data/*.db` so the runtime
+database is never committed.
+
+**`tools/registry.py`**: `PERCEPTION_TOOLS` now holds 6 tools —
+`get_fp_signal`, `thehive_fp_history`, `detection_rule_lookup`,
+`qdrant_retrieve_mitre`, `thehive_open_cases`, `get_case_full` — ordered to
+match the intended call sequence. Zero-overlap assertion against
+`INVESTIGATION_TOOLS` re-verified, still holds.
+
+**`nodes/format_output.py`**: wired `record_triage_outcome()` into the
+full-verdict branch (mode `new` with a `TriageVerdict` present) — not the
+dedup path (no verdict exists), not the merge/delta path (`DeltaVerdict` has
+no TP/FP concept, only a delta on an already-open case), matching §7a's "one
+row per completed triage... reflects the agent's own judgment history," which
+only applies where a real TP/FP/needs_review judgment was made. No-ops
+gracefully via `record_triage_outcome`'s own guard when the alert has no host
+(e.g. a network-only Suricata alert).
+
+**`nodes/perceive.py`**: `PERCEPTION_MAX_TOOL_CALLS` bumped from 4 to 6 to
+match the tool-call-order budget documented in the Phase D prompt update
+below — the old limit predates this phase and would have cut off the fuller
+6-step sequence (`get_fp_signal` → optional `thehive_fp_history` →
+`detection_rule_lookup` → optional `qdrant_retrieve_mitre` →
+`thehive_open_cases` → optional `get_case_full`) partway through.
+
+**Real bug caught while wiring `record_triage_outcome` into
+`format_output.py`, not part of the original plan:** the first test run of
+`test_e2e.py` after this wiring left a real `./data/fp_events.db` file on
+disk — the end-to-end test builds an alert with a real hostname and runs the
+full graph unmocked, so `record_triage_outcome()` wrote to the actual
+production default path as a side effect of running the test suite. Fixed by
+adding `tests/conftest.py` with an autouse fixture that redirects
+`tools.fp_tracking.FP_DB_PATH` to a per-test `tmp_path` for every test in the
+suite — no test should ever be able to touch real application state,
+regardless of which node or tool a given test happens to exercise.
+
+`tests/test_fp_tracking.py` (new, 9 tests): schema creation on first use with
+no pre-existing db file, graceful no-op on missing rule_uuid/host (both for
+`get_fp_signal` and `record_triage_outcome`), writes on both TP and FP
+outcomes, short-term vs long-term window correctness (a 10-day-old event
+counts toward the 30d window but not the 24h one), per-rule/per-host
+scoping, and three cases for the conditional gate (below rate threshold,
+above both thresholds, above rate but below sample-count threshold).
+
+`tests/test_thehive.py`: added coverage for `search_fp_history` (4 tests —
+had none before) and `get_case_full` (2 tests — also had none before,
+despite the function existing since an earlier phase).
+
+`tests/test_format_output.py`: added 2 tests for the new wiring (`Host`
+import added to fixture helper) — records on a host-bearing alert, skips
+recording (no file created) on a hostless one.
+
+## Phase D — update prompts
+
+**`prompts/perceiver.py`**: full rewrite of the tool section. Documents all 6
+`PERCEPTION_TOOLS` with the explicit call order from §7a/the task brief:
+`get_fp_signal` (free, always first) → `thehive_fp_history` (conditional on
+the threshold, explicitly told it queries nothing below it) →
+`detection_rule_lookup` (with the explicit warning that a Suricata rule_uuid
+is the SID, a lookup key, **never** a MITRE technique ID itself) →
+`qdrant_retrieve_mitre` (MITRE inference/kill-chain only, only if no rule
+tags found) → `thehive_open_cases` (correlation, reason about match
+strength, not string equality) → `get_case_full` (only after a candidate is
+found, to read its actual content before the merge/new decision). Added the
+§7a guardrail verbatim in spirit: a high FP rate informs confidence, it never
+auto-decides the verdict. Tool-call budget bumped from 4 to 6 in the prompt
+text to match the fuller sequence (see the matching code change above).
+
+**`prompts/investigator.py`**: full rewrite. Removed all `sigma_rule_lookup`
+references (previously in the main tool list AND 3 of the 5 profile blocks —
+`endpoint_behavior`, `network_anomaly`, `log_anomaly` all told Agent 2 to use
+a tool it no longer has). Replaced the old generic `thehive_search` with
+`thehive_search_closed`, narrowed `qdrant_retrieve`'s documented `collection`
+values from `mitre_attack`/`playbooks`/`cve` to `cve`/`playbooks` only, and
+renamed the `historical_context.mitre_candidates_from_rag` output key to
+`qdrant_rag_results` (the prompt's JSON output template still had the old
+key name — Phase C had already renamed it in `nodes/investigate.py`'s actual
+handling code, so the prompt and the code disagreed on the schema until now).
+Cortex discipline instruction (check `canonical_alert.cortex_results` first,
+skip common infrastructure) was already present from an earlier phase and is
+preserved, now stated with the exact field name. Added an explicit note that
+rule/MITRE-tag lookup and open-case correlation already happened in Agent 1
+and Agent 2 does not have those tools — added because of a real gap this
+surfaced: Agent 2's `rule_context.known_fp_conditions`/`detection_logic`
+output fields can no longer be populated from a live rule-source fetch (that
+tool moved to Agent 1-exclusive in Phase C); Agent 2 now has to reason about
+them from the `alert.rule` fields already in its context instead. §8's own
+"Structured output: Unchanged from v2" note doesn't address this — flagging
+it here rather than pretending the schema and the tool capability are still
+aligned. No Kibana references anywhere (confirmed by test, see below).
+
+`tests/test_prompts.py`: replaced the now-false `"sigma_rule_lookup" in
+prompt` assertion with a dedicated `test_investigator_prompt_has_no_agent1_
+exclusive_tools` covering all 7 Agent-1-exclusive names plus "kibana", plus
+tests for the cortex-discipline instruction and the cve/playbooks-only
+`qdrant_retrieve` scope.
+
+`tests/test_perceiver_prompt.py` (new, 7 tests) — `prompts/perceiver.py` had
+zero test coverage before this phase: all 6 tools documented, `get_fp_signal`
+called first, the 0.5/5-sample threshold documented, the FP guardrail
+language present, the Suricata-SID warning present, `get_case_full`
+documented after `thehive_open_cases` (not before), and no Kibana reference.
+
+156/156 tests passing (130 before this phase — 9 fp_tracking + 2
+format_output + 9 thehive + 12 net-new/replaced prompt tests + 7 perceiver
+prompt tests, with some renames absorbed into that delta). Syntax check,
+import check, `main.py` route check, `python config.py` (confirms
+`FP_DB_PATH` resolves), and the 6-tool `PERCEPTION_TOOLS`/5-tool
+`INVESTIGATION_TOOLS` zero-overlap assertion all verified manually.
+
+### Questions asked to user (resolved)
+
+| Question | Answer |
+|---|---|
+| `get_fp_signal` doesn't exist yet (Phase G territory, with its own open SQLite-path question) — how should Phase D handle documenting a tool that isn't built? | Pull Phase G forward and build it now, rather than writing prompt text for a nonexistent tool or documenting only 4 real tools. |
+| §7a/§13 both scope Phase G as adding `get_fp_signal` AND `thehive_fp_history` (6 tools total with `get_case_full`), not just the 5 the task brief named — proceed with both? | Yes, build both — architecture doc is correct, the brief was short by one. |
+| Where should the FP-tracking SQLite file live? No existing data/var convention in the repo. | `./data/fp_events.db`, create the directory if missing, add `data/*.db` to `.gitignore`. |
+
+### Note on this session's MCP tooling
+
+The user reported connecting an Elasticsearch MCP and a TheHive MCP to this
+session for read-only field/behavior verification against the live
+instances, with explicit ground rules (read-only, flag discrepancies before
+changing code, don't re-open settled decisions without flagging). Searched
+for these tools before starting Phase G and found neither registered in this
+session's available tools — proceeded from the architecture doc's confirmed
+spec and flagged the gap rather than fabricating a live verification that
+didn't happen. If the MCP connection is expected to be live, worth checking
+the session/tool configuration before the next phase that would benefit from
+it (Phase F's end-to-end validation, or any future live-field confirmation
+work).

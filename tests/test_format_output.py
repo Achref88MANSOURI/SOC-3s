@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from schemas import (
     CanonicalAlert,
@@ -8,6 +9,7 @@ from schemas import (
     DeltaEvidence,
     DeltaVerdict,
     EvidencePackage,
+    Host,
     InvestigationTraceEntry,
     Rule,
     TriageState,
@@ -17,13 +19,14 @@ from schemas import (
 from nodes.format_output import SEVERITY_TABLE, format_output
 
 
-def _alert(alert_id: str = "test-001") -> CanonicalAlert:
+def _alert(alert_id: str = "test-001", host: str | None = None) -> CanonicalAlert:
     return CanonicalAlert(
         alert_id=alert_id,
         timestamp=datetime.now(timezone.utc),
         source_engine="suricata",
         investigation_profile="network_threat",
         rule=Rule(name="test", uuid="abc", native_severity=2),
+        host=Host(hostname=host) if host else None,
     )
 
 
@@ -203,3 +206,50 @@ def test_trace_in_output():
     r = result["triage_result"]
     assert len(r.investigation_trace) == 1
     assert r.investigation_trace[0]["tool"] == "sigma_rule_lookup"
+
+
+def test_new_alert_records_fp_outcome_when_host_present(tmp_path):
+    db_path = str(tmp_path / "fp_events.db")
+    state: TriageState = {
+        "canonical_alert": _alert(host="srv-01"),
+        "correlation_result": CorrelationResult(action="new", mode="new"),
+        "mode": "new",
+        "triage_verdict": TriageVerdict(
+            likelihood="unlikely",
+            impact_if_true="minor",
+            verdict="false_positive",
+            reasoning="No evidence",
+            recommended_action="close_fp",
+            summary="FP",
+        ),
+        "evidence_package": EvidencePackage(),
+    }
+    with patch("tools.fp_tracking.FP_DB_PATH", db_path):
+        format_output(state)
+        from tools.fp_tracking import get_fp_signal
+        signal = get_fp_signal("abc", "srv-01")
+
+    assert signal["short_term_total"] == 1
+    assert signal["short_term_fp_rate"] == 1.0
+
+
+def test_new_alert_skips_fp_recording_without_host(tmp_path):
+    db_path = str(tmp_path / "fp_events.db")
+    state: TriageState = {
+        "canonical_alert": _alert(),  # no host — e.g. a network-only Suricata alert
+        "correlation_result": CorrelationResult(action="new", mode="new"),
+        "mode": "new",
+        "triage_verdict": TriageVerdict(
+            likelihood="likely",
+            impact_if_true="severe",
+            verdict="true_positive",
+            reasoning="Evidence supports",
+            recommended_action="create_case",
+            summary="TP",
+        ),
+        "evidence_package": EvidencePackage(),
+    }
+    with patch("tools.fp_tracking.FP_DB_PATH", db_path):
+        format_output(state)
+        import os
+        assert not os.path.exists(db_path)

@@ -153,6 +153,47 @@ def search_closed_cases(
         return []
 
 
+def search_fp_history(rule_uuid: str, host: str, limit: int = 3) -> list[dict]:
+    """Search TheHive alerts closed as Ignored (the FP-close status) for this
+    rule/host combo, returning the reasoning text left behind at closure time.
+    Conditional by design (SOC-3s-ARCHITECTURE-v3-final.md §7a) — the caller
+    only invokes this once the local SQLite FP counter (tools/fp_tracking.py)
+    indicates it's worth pulling the detailed past reasoning."""
+    if not rule_uuid or not host:
+        return []
+
+    query = {
+        "query": {
+            "bool": {
+                "must": [
+                    {"match": {"rule_uuid": rule_uuid}},
+                    {"match": {"host": host}},
+                ],
+            }
+        },
+        "filter": [
+            {"terms": {"status": ["Ignored"]}},
+        ],
+        "size": limit,
+        "sort": [{"createdAt": "desc"}],
+    }
+
+    try:
+        result = _thehive_post("/v1/query", query)
+        alerts = result if isinstance(result, list) else result.get("data", [])
+        return [
+            {
+                "alert_id": a.get("_id", a.get("id", "")),
+                "title": a.get("title", ""),
+                "comment": a.get("summary", a.get("closeComment", "")),
+                "closed_at": a.get("updatedAt", a.get("createdAt", "")),
+            }
+            for a in alerts
+        ]
+    except requests.exceptions.RequestException:
+        return []
+
+
 def get_full_alert_with_analysis(alert_id: str) -> dict | None:
     """Fetch an alert plus its observables, with each observable's Cortex analyzer
     reports attached via TheHive's extraData mechanism (reports are excluded by
