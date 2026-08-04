@@ -3,11 +3,11 @@ from __future__ import annotations
 from langchain_core.tools import tool
 
 from tools.cortex import analyze_observable as _cortex_analyze
+from tools.detection_rules import get_rule_source as _detection_rule
 from tools.elasticsearch import query_related_alerts, query_process_history, query_connection_history
 from tools.itop import lookup_asset as _itop_lookup
 from tools.qdrant import retrieve_mitre, retrieve_playbooks, retrieve_cve
-from tools.detection_rules import get_rule_source as _detection_rule
-from tools.thehive import search_open_cases, search_closed_cases, get_case_full
+from tools.thehive import search_open_cases, search_closed_cases
 
 
 @tool
@@ -47,37 +47,35 @@ def elasticsearch_query(index_type: str = "alerts", host: str = "", user: str = 
 
 
 @tool
-def thehive_search(query_type: str, observables: str = "", host: str = "", user: str = "", case_id: str = "") -> list | dict:
-    """Search TheHive for cases.
-    query_type: 'open_cases' (find by observable/host/user), 'closed_cases', or 'get_case'.
-    """
+def thehive_search_closed(observables: str = "", rule_uuid: str = "") -> list:
+    """Search TheHive for resolved/closed cases — "has this rule fired before,
+    what happened?" observables is a comma-separated list of IPs/domains/hashes.
+    Agent 2 only — open-case correlation is Agent 1's job (thehive_open_cases)."""
     obs_list = [s.strip() for s in observables.split(",") if s.strip()] if observables else []
-
-    if query_type == "open_cases":
-        return search_open_cases(observables=obs_list or None, host=host or None, user=user or None)
-    elif query_type == "closed_cases":
-        return search_closed_cases(observables=obs_list or None)
-    elif query_type == "get_case" and case_id:
-        result = get_case_full(case_id)
-        return result or {"error": "Case not found", "case_id": case_id}
-    return []
+    return search_closed_cases(rule_uuid=rule_uuid or None, observables=obs_list or None)
 
 
 @tool
-def sigma_rule_lookup(rule_uuid: str) -> dict:
-    """Look up a Sigma rule by UUID from the local filesystem. Returns description, FP conditions, MITRE tags."""
-    return _detection_rule(rule_uuid)
+def detection_rule_lookup(rule_uuid: str, source_engine: str = "") -> dict:
+    """Look up a detection rule's source and MITRE ATT&CK metadata by UUID,
+    across all three Security Onion engines. Pass source_engine ('sigma',
+    'suricata', or 'yara'/'strelka') if known — the alert's source_engine field
+    tells you this — to skip straight to the right lookup. If omitted, tries
+    Sigma YAML, then Suricata .rules metadata, then falls back to YARA's
+    graceful "no lookup mechanism exists" response. Suricata and Sigma results
+    include a `mitre_attack` list of technique IDs when the rule has them —
+    absence is common and not an error (only ~50% of Suricata rules carry
+    MITRE metadata). YARA never returns a real lookup — it has no
+    centrally indexed rule source or native MITRE tagging convention."""
+    return _detection_rule(rule_uuid, source_engine or None)
 
 
 @tool
 def qdrant_retrieve(collection: str, query_text: str, top_k: int = 5) -> list:
-    """Search Qdrant vector DB for MITRE techniques, playbooks, or CVEs.
-    collection: 'mitre_attack', 'playbooks', or 'cve'.
-    Returns relevant matches with scores.
-    """
-    if collection == "mitre_attack":
-        return retrieve_mitre(query_text, top_k)
-    elif collection == "playbooks":
+    """Search Qdrant vector DB for playbooks or CVEs. collection: 'playbooks' or
+    'cve'. Returns relevant matches with scores. For MITRE technique search,
+    that's Agent 1's tool (qdrant_retrieve_mitre) — not available here."""
+    if collection == "playbooks":
         return retrieve_playbooks(query_text, top_k)
     elif collection == "cve":
         return retrieve_cve(query_text, top_k)
@@ -88,7 +86,7 @@ def qdrant_retrieve(collection: str, query_text: str, top_k: int = 5) -> list:
 def qdrant_retrieve_mitre(query_text: str, top_k: int = 5) -> list:
     """Search Qdrant for candidate MITRE ATT&CK techniques matching a description
     of the alert's behavior (rule name, description, command line, etc). Use this
-    when no explicit attack.txxxx tags are available from sigma_rule_lookup."""
+    when no explicit MITRE tags are available from detection_rule_lookup."""
     return retrieve_mitre(query_text, top_k)
 
 
@@ -100,17 +98,25 @@ def thehive_open_cases(observables: str = "", host: str = "", user: str = "") ->
     return search_open_cases(observables=obs_list or None, host=host or None, user=user or None)
 
 
-TOOLS = [
-    cortex_analyze,
-    itop_asset_lookup,
-    elasticsearch_query,
-    thehive_search,
-    sigma_rule_lookup,
-    qdrant_retrieve,
+# Per-agent tool lists (SOC-3s-ARCHITECTURE-v3-final.md §1/§6/§8/§13 Phase C):
+# no tool appears in both. Agent 1 (perceive) owns open-case correlation and
+# MITRE tag extraction; Agent 2 (investigate) owns closed-case history,
+# telemetry, and enrichment.
+PERCEPTION_TOOLS = [
+    detection_rule_lookup,
+    thehive_open_cases,
+    qdrant_retrieve_mitre,
 ]
 
-PERCEPTION_TOOLS = [
-    sigma_rule_lookup,
-    qdrant_retrieve_mitre,
-    thehive_open_cases,
+INVESTIGATION_TOOLS = [
+    thehive_search_closed,
+    elasticsearch_query,
+    itop_asset_lookup,
+    qdrant_retrieve,
+    cortex_analyze,
 ]
+
+_perception_names = {t.name for t in PERCEPTION_TOOLS}
+_investigation_names = {t.name for t in INVESTIGATION_TOOLS}
+_overlap = _perception_names & _investigation_names
+assert not _overlap, f"Tool overlap between PERCEPTION_TOOLS and INVESTIGATION_TOOLS: {_overlap}"

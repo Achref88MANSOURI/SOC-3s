@@ -87,26 +87,41 @@ def test_merge_cortex_results_empty_agent_output():
     assert merged[0].observable == "1.1.1.1"
 
 
-def test_build_from_tool_results_buckets_sigma_and_cortex():
+def test_build_from_tool_results_buckets_itop_and_cortex():
+    # sigma_rule_lookup/detection_rule_lookup is Agent 1-exclusive as of Phase C
+    # (SOC-3s-ARCHITECTURE-v3-final.md §1/§13) — Agent 2 never sees it in a
+    # trace, so this only exercises tools actually in INVESTIGATION_TOOLS.
     messages = [
-        _FakeMsg("tool", json.dumps({"found": True, "description": "d", "tags": ["attack.t1059"], "level": "high"}), name="sigma_rule_lookup"),
+        _FakeMsg("tool", json.dumps({"found": True, "hostname": "srv-01", "criticality": "high"}), name="itop_asset_lookup"),
         _FakeMsg("tool", json.dumps({"observable": "1.2.3.4", "type": "ip", "verdict": "malicious", "score": 90, "analyzer": "vt"}), name="cortex_analyze"),
     ]
     data = _build_from_tool_results(messages, [])
-    assert data["rule_context"]["description"] == "d"
+    assert data["asset_context"]["hostname"] == "srv-01"
     assert data["threat_intel"][0]["observable"] == "1.2.3.4"
     assert "structured JSON" in data["investigation_gaps"][0]
 
 
+def test_build_from_tool_results_buckets_qdrant_and_thehive_closed():
+    messages = [
+        _FakeMsg("tool", json.dumps([{"title": "Ransomware playbook"}]), name="qdrant_retrieve"),
+        _FakeMsg("tool", json.dumps([{"case_id": "case-1", "resolution": "TruePositive"}]), name="thehive_search_closed"),
+    ]
+    data = _build_from_tool_results(messages, [])
+    # Renamed from "mitre_candidates_from_rag" — Agent 2's qdrant_retrieve is
+    # cve/playbooks only now, never MITRE, so the old key name was misleading.
+    assert data["historical_context"]["qdrant_rag_results"][0]["title"] == "Ransomware playbook"
+    assert data["historical_context"]["similar_past_cases"][0]["case_id"] == "case-1"
+
+
 def test_extract_trace_pairs_calls_with_results():
     messages = [
-        _FakeMsg("ai", "", tool_calls=[{"id": "1", "name": "sigma_rule_lookup", "args": {"rule_uuid": "abc"}}]),
+        _FakeMsg("ai", "", tool_calls=[{"id": "1", "name": "itop_asset_lookup", "args": {"hostname": "srv-01"}}]),
         _FakeMsg("tool", "result content", tool_call_id="1"),
     ]
     trace = _extract_trace(messages)
     assert len(trace) == 1
-    assert trace[0].tool == "sigma_rule_lookup"
-    assert trace[0].params == {"rule_uuid": "abc"}
+    assert trace[0].tool == "itop_asset_lookup"
+    assert trace[0].params == {"hostname": "srv-01"}
 
 
 def test_get_final_text_returns_last_non_tool_call_ai_message():
@@ -166,8 +181,8 @@ def test_investigate_falls_back_to_tool_trace_on_unparseable_json(mock_create_ag
     fake_agent = MagicMock()
     fake_agent.invoke.return_value = {
         "messages": [
-            _FakeMsg("ai", "", tool_calls=[{"id": "1", "name": "sigma_rule_lookup", "args": {"rule_uuid": "uuid-abc"}}]),
-            _FakeMsg("tool", json.dumps({"found": True, "description": "fp desc"}), name="sigma_rule_lookup", tool_call_id="1"),
+            _FakeMsg("ai", "", tool_calls=[{"id": "1", "name": "itop_asset_lookup", "args": {"hostname": "srv-01"}}]),
+            _FakeMsg("tool", json.dumps({"found": True, "hostname": "srv-01", "criticality": "high"}), name="itop_asset_lookup", tool_call_id="1"),
             _FakeMsg("ai", "not valid json"),
         ]
     }
@@ -176,7 +191,7 @@ def test_investigate_falls_back_to_tool_trace_on_unparseable_json(mock_create_ag
     state: TriageState = {"mode": "new", "canonical_alert": _alert()}
     result = investigate(state)
 
-    assert result["evidence_package"].rule_context["description"] == "fp desc"
+    assert result["evidence_package"].asset_context["hostname"] == "srv-01"
     assert "structured JSON" in result["evidence_package"].investigation_gaps[0]
 
 

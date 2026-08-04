@@ -803,3 +803,85 @@ previously untested).
 
 129/129 tests passing (117 before this phase, 12 net new). Syntax check,
 import check, and `tools.registry` tool listings also verified manually.
+
+## Phase C — split tool lists in registry.py
+
+`tools/registry.py`'s old single `TOOLS` list (shared by both agents) is
+replaced with two disjoint lists, per §1/§6/§8/§13's "no tool duplication"
+principle: Agent 1 (perceive) owns open-case correlation and MITRE tag
+extraction; Agent 2 (investigate) owns closed-case history, telemetry, and
+enrichment.
+
+```python
+PERCEPTION_TOOLS = [detection_rule_lookup, thehive_open_cases, qdrant_retrieve_mitre]
+INVESTIGATION_TOOLS = [thehive_search_closed, elasticsearch_query, itop_asset_lookup, qdrant_retrieve, cortex_analyze]
+```
+
+A module-level `assert not (PERCEPTION_TOOLS names & INVESTIGATION_TOOLS
+names)` enforces the zero-overlap invariant at import time — if a future edit
+accidentally adds a tool to both lists, the service fails to start rather than
+silently violating the design principle.
+
+**Renames/splits, not just a list re-shuffle:**
+- `sigma_rule_lookup` → `detection_rule_lookup`, wrapping Phase B's
+  `get_rule_source`, with a new optional `source_engine` param so Agent 1 can
+  pass the alert's known engine (`alert.source_engine`) and skip the
+  no-hint fallback chain. Agent 1-exclusive.
+- The old generic `thehive_search` (three modes: `open_cases`/`closed_cases`/
+  `get_case`) is split into `thehive_open_cases` (Agent 1) and
+  `thehive_search_closed` (Agent 2) — one tool, one job, per engine
+  ownership. The `get_case` mode is dropped entirely (see discrepancy note
+  below).
+- `qdrant_retrieve`'s `collection` param narrowed from
+  `mitre_attack`/`playbooks`/`cve` to just `playbooks`/`cve` — MITRE search
+  moved exclusively to `qdrant_retrieve_mitre` (Agent 1-only), so Agent 2's
+  `qdrant_retrieve` can no longer search MITRE at all.
+
+**Known discrepancy vs §11, not yet resolved:** §11's broader tool inventory
+lists a case-detail lookup (`get_case_full` in `tools/thehive.py`, still
+present and functional — just no longer wrapped as a registered tool) as
+something Agent 1 needs "on merge" to pull full context from the matched
+case. Phase C's literal tool-list scope (§13) doesn't include it in either
+list. Flagging here rather than silently dropping the capability or silently
+adding it back without confirmation — Agent 1 currently gets merge-mode
+context only from `correlate.py`'s `existing_case_context` (already gathered
+during the correlate node, not from a tool call), not from a live
+`get_case_full` call during investigation. Needs a decision on whether that's
+sufficient or whether `get_case_full` should be added to `PERCEPTION_TOOLS`
+in a later phase.
+
+**`nodes/investigate.py` updated to match:** import/usage switched from
+`TOOLS` to `INVESTIGATION_TOOLS`; `_build_from_tool_results()`'s fallback-
+bucketing lost its dead `sigma_rule_lookup` branch (Agent 2 never has this
+tool, so it could never fire) and renamed its `thehive_search` branch to
+`thehive_search_closed`; the `historical_context` bucket key
+`mitre_candidates_from_rag` renamed to `qdrant_rag_results` (Agent 2's
+`qdrant_retrieve` is cve/playbooks only now, never MITRE — the old name was
+actively misleading about what could be in it).
+
+**Real bug found and fixed while updating tests for this phase, unrelated to
+the rename itself:** `_try_parse_json()` in `nodes/investigate.py` extracted
+JSON via a naive `text.find("{")` / `text.rfind("}")` substring slice. Tool
+results that are list-shaped — `elasticsearch_query`, `qdrant_retrieve`,
+`thehive_search_closed` all return lists — still contain a valid `{...}`
+substring inside their `[...]` wrapper (e.g. `'[{"title": "x"}]'`), so the old
+code silently returned just the first dict element instead of the actual
+list, or `None`. Every `isinstance(parsed, list)` check gating those three
+tools' fallback-bucketing branches in `_build_from_tool_results` was
+therefore dead code in practice — confirmed directly via a REPL check before
+fixing. Rewrote to try `json.loads(text)` on the whole (fence-stripped) text
+first, which correctly preserves whichever shape the content actually is,
+falling back to the old brace/bracket-extraction heuristic only for text with
+real surrounding prose. Caught by a new test
+(`test_build_from_tool_results_buckets_qdrant_and_thehive_closed`) written for
+this phase, not by pre-existing coverage.
+
+`tests/test_investigate.py` updated: two existing tests referencing the
+removed `sigma_rule_lookup` tool renamed/rewritten against `itop_asset_lookup`
+(still in `INVESTIGATION_TOOLS`); one new test added for the qdrant/thehive
+list-shaped bucketing (which exposed the `_try_parse_json` bug above).
+
+130/130 tests passing (129 before this phase, 1 net new — 2 tests renamed in
+place rather than added). Syntax check, import check, `main.py` route check,
+and the `PERCEPTION_TOOLS`/`INVESTIGATION_TOOLS` zero-overlap assertion all
+verified manually.

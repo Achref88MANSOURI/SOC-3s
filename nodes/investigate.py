@@ -10,7 +10,7 @@ from langgraph.prebuilt import create_react_agent
 from config import settings
 from prompts.investigator import build_prompt
 from schemas import DeltaEvidence, EvidencePackage, InvestigationTraceEntry, TriageState
-from tools.registry import TOOLS
+from tools.registry import INVESTIGATION_TOOLS
 
 logger = logging.getLogger("agent-service.investigate")
 
@@ -35,7 +35,7 @@ def investigate(state: TriageState) -> TriageState:
 
     agent = create_react_agent(
         model=_model,
-        tools=TOOLS,
+        tools=INVESTIGATION_TOOLS,
         prompt=system_prompt,
     )
 
@@ -131,16 +131,7 @@ def _build_from_tool_results(messages: list, trace: list[InvestigationTraceEntry
         if not parsed:
             continue
 
-        if name == "sigma_rule_lookup":
-            data["rule_context"] = {
-                "description": parsed.get("description", parsed.get("error", "")),
-                "detection_logic": parsed.get("detection_logic", ""),
-                "known_fp_conditions": parsed.get("falsepositives", []) if isinstance(parsed.get("falsepositives"), list) else [parsed.get("falsepositives", "")],
-                "mitre_tags_from_source": parsed.get("tags", []) if isinstance(parsed.get("tags"), list) else [parsed.get("tags", "")],
-                "severity_from_source": parsed.get("level", ""),
-            }
-
-        elif name == "itop_asset_lookup" and parsed.get("found"):
+        if name == "itop_asset_lookup" and parsed.get("found"):
             data["asset_context"] = {
                 "hostname": parsed.get("hostname", ""),
                 "criticality": parsed.get("criticality", ""),
@@ -163,7 +154,10 @@ def _build_from_tool_results(messages: list, trace: list[InvestigationTraceEntry
                 data["threat_intel"].append(entry)
 
         elif name == "qdrant_retrieve" and isinstance(parsed, list):
-            data["historical_context"]["mitre_candidates_from_rag"] = parsed
+            # Agent 2's qdrant_retrieve is cve/playbooks only as of Phase C —
+            # MITRE search moved to Agent 1's qdrant_retrieve_mitre, so this is
+            # never technique candidates despite the old key name it used to have.
+            data["historical_context"]["qdrant_rag_results"] = parsed
 
         elif name == "elasticsearch_query" and isinstance(parsed, list):
             if not data["temporal_context"].get("related_alerts_same_host_24h"):
@@ -172,7 +166,7 @@ def _build_from_tool_results(messages: list, trace: list[InvestigationTraceEntry
                 existing = data["temporal_context"].get("related_alerts_same_host_24h", [])
                 data["temporal_context"]["related_alerts_same_host_24h"] = (existing + parsed)[:10]
 
-        elif name == "thehive_search" and isinstance(parsed, list):
+        elif name == "thehive_search_closed" and isinstance(parsed, list):
             if not data["historical_context"].get("similar_past_cases"):
                 data["historical_context"]["similar_past_cases"] = parsed[:5]
 
@@ -257,21 +251,41 @@ def _get_final_text(messages: list) -> str:
     return ""
 
 
-def _try_parse_json(text: str) -> dict | None:
+def _try_parse_json(text: str) -> dict | list | None:
+    """Tool results can be dict- or list-shaped (elasticsearch_query,
+    qdrant_retrieve, thehive_search_closed all return lists). A naive
+    find("{")/rfind("}") extraction — the original approach here — silently
+    unwraps a list's first dict element instead of returning the list itself
+    or None, since "[{...}]" still contains a valid {...} substring. Try a
+    direct parse of the whole (fence-stripped) text first, which correctly
+    preserves whichever shape the content actually is; only fall back to
+    brace/bracket extraction for text with real surrounding prose."""
     text = text.strip()
     if not text:
         return None
     if text.startswith("```"):
         lines = text.split("\n")
         text = "\n".join(l for l in lines if not l.strip().startswith("```")).strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(text[start:end + 1])
-        except json.JSONDecodeError:
-            return None
-    return None
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    brace_start = text.find("{")
+    bracket_start = text.find("[")
+    starts = [i for i in (brace_start, bracket_start) if i != -1]
+    if not starts:
+        return None
+    start = min(starts)
+    closer = "}" if text[start] == "{" else "]"
+    end = text.rfind(closer)
+    if end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
 
 
 def _fallback_state(state: TriageState, mode: str, error: str, existing_cortex_results: list) -> TriageState:
