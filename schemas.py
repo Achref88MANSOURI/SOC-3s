@@ -55,8 +55,10 @@ class Process(BaseModel):
     name: Optional[str] = None
     path: Optional[str] = None
     command_line: Optional[str] = None
+    working_directory: Optional[str] = None
     parent_pid: Optional[int] = None
     parent_name: Optional[str] = None
+    parent_command_line: Optional[str] = None
 
 
 class File(BaseModel):

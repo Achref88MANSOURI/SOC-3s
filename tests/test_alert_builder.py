@@ -5,7 +5,7 @@ from alert_builder import build_canonical_alert
 
 def _sigma_raw_alert():
     # Matches the n8n Alert Builder output shape documented in
-    # SOC-3s-ARCHITECTURE-v2.md §3.
+    # SOC-3s-ARCHITECTURE-v3-final.md §3.
     return {
         "type": "sigma",
         "source": "security-onion",
@@ -147,3 +147,144 @@ def test_build_canonical_alert_falls_back_when_description_unparseable():
     assert alert.rule.uuid == ""
     assert alert.host is None
     assert "203.0.113.5" in alert.observables.external_ips
+
+
+# --- Phase A: per-engine structured extraction (SOC-3s-ARCHITECTURE-v3-final.md §5/§13) ---
+# Field paths below are hand-built from confirmed live-payload facts and Security
+# Onion's own ingest pipelines (so-ingest-reference/), not derived from any single
+# captured sample — alert_builder.py must not be designed around just one alert shape.
+
+
+def _sigma_event_data_alert():
+    return {
+        "type": "sigma",
+        "title": "[HIGH] Suspicious Process - workstation-07",
+        "description": (
+            "Detection engine: sigma\n"
+            "Rule: Suspicious Process (aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)\n"
+            "Host: some-other-hostname (10.0.0.1)\n"
+            "Command line: this text must NOT win if event_data is present"
+        ),
+        "severity": 3,
+        "date": 1784710559000,
+        "tags": ["engine:sigma"],
+        "observables": [],
+        "event_data": {
+            "host": {"hostname": "workstation-07", "ip": ["172.20.24.50"], "os": {"family": "windows"}},
+            "user": {"name": "alice", "id": "S-1-5-21-9999"},
+            "process": {
+                "name": "cmd.exe",
+                "executable": "C:\\Windows\\System32\\cmd.exe",
+                "command_line": "cmd.exe /c whoami",
+                "pid": 5150,
+                "working_directory": "C:\\Users\\alice\\",
+                "hash": {"sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85", "md5": "d41d8cd98f00b204e9800998ecf8427e"},
+                "pe": {"imphash": "0123456789abcdef0123456789abcdef"},
+                "parent": {"name": "explorer.exe", "command_line": "C:\\Windows\\explorer.exe", "pid": 3300},
+            },
+        },
+    }
+
+
+def test_build_canonical_alert_prefers_event_data_over_regex():
+    alert = build_canonical_alert(_sigma_event_data_alert(), None, {})
+
+    # host/process come from event_data, not the (deliberately conflicting) description text
+    assert alert.host.hostname == "workstation-07"
+    assert alert.host.ip == ["172.20.24.50"]
+    assert alert.user.name == "alice"
+    assert alert.user.id == "S-1-5-21-9999"
+    assert alert.process.command_line == "cmd.exe /c whoami"
+    assert alert.process.name == "cmd.exe"
+    assert alert.process.pid == 5150
+    assert alert.process.working_directory == "C:\\Users\\alice\\"
+    assert alert.process.parent_name == "explorer.exe"
+    assert alert.process.parent_command_line == "C:\\Windows\\explorer.exe"
+    assert alert.process.parent_pid == 3300
+    assert "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85" in alert.observables.hashes.sha256
+    assert "d41d8cd98f00b204e9800998ecf8427e" in alert.observables.hashes.md5
+    assert "0123456789abcdef0123456789abcdef" in alert.observables.hashes.imphash
+
+
+def test_build_canonical_alert_event_data_missing_fields_stay_none():
+    raw = _sigma_event_data_alert()
+    del raw["event_data"]["process"]["parent"]
+    alert = build_canonical_alert(raw, None, {})
+
+    assert alert.process.parent_name is None
+    assert alert.process.parent_command_line is None
+    assert alert.process.parent_pid is None
+
+
+def test_build_canonical_alert_suricata_structured_rule_and_network():
+    raw = {
+        "type": "suricata",
+        "title": "ET SCAN Possible Nmap",
+        "description": "no structured description fields here",
+        "severity": 2,
+        "date": 1784710559000,
+        "tags": [],
+        "observables": [],
+        "rule": {"name": "ET SCAN Possible Nmap", "uuid": "2010665"},
+        "source": {"ip": "203.0.113.5", "port": 443},
+        "destination": {"ip": "198.51.100.9", "port": 80},
+        "network": {"transport": "tcp"},
+    }
+    alert = build_canonical_alert(raw, None, {})
+
+    assert alert.rule.name == "ET SCAN Possible Nmap"
+    assert alert.rule.uuid == "2010665"
+    assert alert.network.src_ip == "203.0.113.5"
+    assert alert.network.dst_ip == "198.51.100.9"
+    assert alert.network.src_port == 443
+    assert alert.network.dst_port == 80
+    assert alert.network.protocol == "tcp"
+    assert alert.process is None
+    assert alert.user is None
+
+
+def test_build_canonical_alert_suricata_string_source_field_does_not_crash():
+    """n8n's envelope has a top-level `source` string (source *system*, e.g.
+    "security-onion") that collides in name with Suricata's ECS `source` object
+    (network source ip/port). Must degrade to "no network data" rather than
+    raising AttributeError."""
+    raw = {
+        "type": "suricata",
+        "source": "security-onion",  # string, not a dict — the regression case
+        "title": "ET SCAN Possible Nmap",
+        "description": "x",
+        "severity": 2,
+        "date": 1784710559000,
+        "tags": [],
+        "observables": [],
+    }
+    alert = build_canonical_alert(raw, None, {})
+    assert alert.network is None
+
+
+def test_build_canonical_alert_yara_structured_rule_and_file():
+    raw = {
+        "type": "yara",
+        "title": "Malicious PE Detected",
+        "description": "no structured description fields here",
+        "severity": 3,
+        "date": 1784710559000,
+        "tags": [],
+        "observables": [],
+        "rule": {"name": "Malicious_PE_Generic", "uuid": "Malicious_PE_Generic"},
+        "file": {
+            "name": "invoice.exe",
+            "path": "/nsm/strelka/processed/invoice.exe",
+            "hash": {"md5": "9e107d9d372bb6826bd81d3542a419d6", "sha256": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"},
+        },
+    }
+    alert = build_canonical_alert(raw, None, {})
+
+    assert alert.rule.name == "Malicious_PE_Generic"
+    assert alert.rule.uuid == "Malicious_PE_Generic"  # YARA: uuid == rule name, not a separate ID
+    assert alert.file.name == "invoice.exe"
+    assert alert.file.path == "/nsm/strelka/processed/invoice.exe"
+    assert "9e107d9d372bb6826bd81d3542a419d6" in alert.observables.hashes.md5
+    assert "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d" in alert.observables.hashes.sha256
+    assert alert.process is None
+    assert alert.network is None

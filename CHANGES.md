@@ -627,3 +627,111 @@ resolution of the prompt-file finding above:
 
 112/112 tests passing (no `.py` files touched — this phase was deletions of
 two `.md`-adjacent files only).
+
+## Phase A — alert_builder.py event_data fix
+
+### Research: read Security Onion's actual ingest pipelines before writing code
+
+Per explicit instruction, read `so-ingest-reference/salt/elasticsearch/files/
+ingest/{common,common.nids,suricata.alert,strelka.file,sysmon,win.eventlogs,
+global@custom,common.ip_validation,ecs}` and
+`so-ingest-reference/salt/logstash/pipelines/config/so/0012_input_elastic_agent.conf.jinja`
+(a real, sparse-checked-out clone of Security Onion's own repo, present in the
+main checkout at `/home/ai-vm/agent-service/so-ingest-reference`, outside this
+worktree) before touching `alert_builder.py`. Findings reported to the user
+before writing code:
+
+- Suricata (`suricata.alert` → `common.nids` → `common`): confirms §7's SID
+  finding — `rule.uuid` is the numeric SID, not a MITRE ID. Fields land at the
+  top level (`rule.name`, `rule.uuid`, `rule.reference`, `rule.ruleset`,
+  `event.severity`/`.severity_label`), no `event_data` nesting.
+- YARA/Strelka (`strelka.file`): `rule.uuid` is set to `rule.name` itself, not
+  a separate numeric ID — the ingest pipeline literally does
+  `rule.uuid = rule.name`. Arbitrary YARA rule `meta` keys flatten to
+  `rule.{key}`, so MITRE tagging is possible per-rule but never structurally
+  guaranteed — confirms the doc's "graceful empty-return" call. No `event_data`
+  nesting.
+- Sigma: **no dedicated ingest pipeline exists at all** (confirmed via
+  `grep -rli "sigma\|elastalert"` across the whole reference repo — zero hits).
+  ElastAlert2 queries already-ingested telemetry and embeds the matched
+  document under `event_data`; two different agents produce that telemetry
+  with different field layouts (Winlogbeat+Sysmon vs Elastic Agent/Defend) —
+  reported to the user as a real ambiguity before writing extraction code
+  (see "Questions asked" below).
+
+### User-provided confirmed facts (superseded some of the pipeline-derived detail)
+
+The user then provided a confirmed field-path list from live captured payloads
+across the project (not from `so-ingest-reference` alone), and explicitly
+deleted `alert-sample.json` — the single sample the previous session's
+`test_e2e.py` fixture was built from — with the instruction not to reference
+or restore it, and to design `alert_builder.py` from the pipeline research
+plus these confirmed facts, not one sample. Confirmed facts used directly:
+Sigma's `event_data.{host,user,process}.*` paths (all genuinely optional, not
+tied to one telemetry source), Suricata's top-level `rule`/`source`/
+`destination`/`network`/`event` fields (no `event_data`, no process/user/hash),
+YARA's top-level `rule`/`file` fields (`rule.uuid == rule.name`, no
+`event_data`).
+
+### Implementation
+
+`alert_builder.py`:
+- `_parse_rule()`: now tries a structured top-level `raw_alert["rule"]` dict
+  first (Suricata/YARA), falling through to the existing description-regex/tag
+  parsing only when absent (Sigma, or any alert without a `rule` dict).
+- New: `_extract_host_from_event_data()`, `_extract_user_from_event_data()`,
+  `_extract_process_from_event_data()` (Sigma) — structured extraction from
+  `raw_alert["event_data"]`, preferred over the regex/description fallback,
+  which still runs when `event_data` is absent or a given sub-object is empty.
+  A couple of extra fallback locations beyond the user's confirmed list are
+  also checked defensively (top-level `event_data.hash.*`, `process.ppid`) —
+  not independently confirmed live, based on the `sysmon` ingest pipeline
+  source, kept as harmless additional coverage since every lookup degrades to
+  `None` rather than raising.
+- New: `_extract_network_from_raw_alert()` (Suricata), `_extract_file_from_raw_alert()`
+  (YARA) — structured top-level extraction, wired into `build_canonical_alert()`
+  (previously `network`/`file` were always `None`).
+- New: `_merge_hashes()` — merges structured-extraction hashes into the same
+  `Observables.hashes` bundle the IOC-tagged `observables` array already
+  populates, deduped.
+- New: `_as_dict()` helper, applied to every nested-object lookup in this
+  file. **Found and fixed a real bug while writing tests, not by inspection:**
+  n8n's Alert Builder envelope has a top-level `source` key that's a *string*
+  (the source system, e.g. `"security-onion"`) — this collides in name with
+  Suricata's ECS `source` object (network source ip/port). The first version
+  of `_extract_network_from_raw_alert()` called `.get()` on it directly and
+  crashed with `AttributeError: 'str' object has no attribute 'get'` against
+  the *existing* Sigma test fixture (which has always had `"source":
+  "security-onion"`). `_as_dict()` makes every nested-object lookup in this
+  file degrade to "field absent" on a type mismatch instead of raising.
+
+`schemas.py`: `Process` gained two fields the confirmed extraction needs and
+didn't have a home for: `working_directory` and `parent_command_line`.
+
+`tests/test_alert_builder.py`: 5 new tests — event_data taking precedence over
+(deliberately conflicting) description text, event_data with a missing
+sub-object (`parent`) leaving those fields `None` rather than erroring,
+Suricata structured rule+network extraction, the `source`-string-collision
+regression case above, YARA structured rule+file extraction (including
+`rule.uuid == rule.name`).
+
+`tests/test_e2e.py`: **fixed a break caused by the `alert-sample.json`
+deletion** — its fixture builder read that file directly. Replaced with
+`_build_sigma_raw_alert()`, a hand-built fixture using the same confirmed
+`event_data` field paths (not derived from any sample). Same two tests as
+before, same assertions, just a different fixture source.
+
+Also updated two stale `SOC-3s-ARCHITECTURE-v2.md` section references left
+over in `alert_builder.py`/`tests/test_alert_builder.py` from before this
+session's v3 migration, to point at `SOC-3s-ARCHITECTURE-v3-final.md` §5
+instead — noticed while editing these files, in scope since these are exactly
+the files this phase touches.
+
+### Questions asked to user (resolved)
+
+| Question | Answer |
+|---|---|
+| Two different Sigma-alert telemetry shapes exist depending on the source agent (Winlogbeat+Sysmon vs Elastic Agent/Defend), but only one is independently confirmed live — build for both from pipeline source, restrict to the confirmed one, or wait for a live Sysmon sample? | Build for both, from pipeline source; note the Sysmon path as unverified. (Superseded in part by the user's follow-up: don't design around any single sample at all — confirmed facts + pipeline research instead.) |
+
+117/117 tests passing (112 before this phase, 5 net new). Syntax check and
+import check also passed manually.
