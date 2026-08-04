@@ -1087,3 +1087,98 @@ didn't happen. If the MCP connection is expected to be live, worth checking
 the session/tool configuration before the next phase that would benefit from
 it (Phase F's end-to-end validation, or any future live-field confirmation
 work).
+
+### Known limitation, accepted for now: Agent 2's rule_context gap
+
+The Phase D `investigator.py` update noted that Agent 2's `rule_context.
+known_fp_conditions`/`detection_logic` output fields can no longer be
+populated from a live rule-source fetch — `detection_rule_lookup` moved to
+Agent 1-exclusive in Phase C, and no equivalent tool was added to
+`INVESTIGATION_TOOLS`. Decision: accept this for now rather than add a tool
+back or duplicate rule-source access across both agents. Agent 1's
+`mitre_mapping[].basis` strings (its stated reasoning for each technique
+inference) are the mechanism carrying the most load-bearing rule context
+forward into the pipeline — Agent 2 and Agent 3 both see the alert's
+`mitre_mapping` in their input. If Tier 0 testing shows Agent 2 producing
+poor FP assessments specifically traceable to not seeing the rule's own
+documented false-positive conditions, the fix is to add the rule source (or
+just its `known_fp_conditions`/description) as a field on the handoff from
+Agent 1 into `investigate.py`'s human message — not to re-grant Agent 2 a
+rule-lookup tool, which would reintroduce the duplication Phase C's split
+was designed to remove.
+
+## Phase E — cleanup: delete outdated files (verified, not re-run)
+
+Re-checked against §13's Phase E instruction before doing any deletion work
+this session. Finding: **Phase E was already completed**, in commit
+`76d647d` ("v3-final: reconciliation + Phase E cleanup"), before this
+session's Phase A work even started — it deleted
+`claude-code-v3-final-prompt-2.md` (stale v2-era template) and
+`CONTEXT.md.save` (leftover pre-v2 doc backup), and committed the user's own
+prior deletion of `SOC-3s-ARCHITECTURE-v2.md` and
+`claude-code-session-prompt.md`.
+
+Confirmed against current disk state before concluding there was nothing
+left to do: repo root holds exactly `SOC-3s-ARCHITECTURE-v3-final.md`,
+`CHANGES.md`, `N8N-INTEGRATION.md` (§13's explicit keep list) plus
+`CLAUDE.md` (project instructions, a different category, not a
+prompt/architecture draft). A repo-wide search for `*.save`, `*draft*`,
+`*OLD*`, `*v2*`, `*prompt-2*`, `*session-prompt*` (excluding `.git/`,
+`so-ingest-reference/`, `__pycache__/`, `.pytest_cache/`) returned zero
+matches. Nothing deleted this session — nothing on disk matched the
+deletion criteria.
+
+## Phase F — end-to-end validation
+
+- `pytest tests/ -v`: **156/156 passing.**
+- `grep -rli "kibana" tools/ nodes/ prompts/`: **zero hits.** (The only
+  "kibana" string anywhere in the repo is the intentional "tried and
+  reverted" documentation inside `SOC-3s-ARCHITECTURE-v3-final.md` itself —
+  outside the scope of this check, and correctly so: it's a historical
+  record of a rejected design, not live code or a live prompt.)
+- `PERCEPTION_TOOLS`/`INVESTIGATION_TOOLS` zero-overlap: **holds.**
+  `PERCEPTION_TOOLS` (6): `detection_rule_lookup`, `get_case_full`,
+  `get_fp_signal`, `qdrant_retrieve_mitre`, `thehive_fp_history`,
+  `thehive_open_cases`. `INVESTIGATION_TOOLS` (5): `cortex_analyze`,
+  `elasticsearch_query`, `itop_asset_lookup`, `qdrant_retrieve`,
+  `thehive_search_closed`. No name appears in both — verified both via the
+  module-level `assert` in `tools/registry.py` (which import already
+  exercises on every test run) and independently at the shell.
+
+### Open items carried forward (not blocking, not silently resolved)
+
+1. **Agent 2's rule_context gap** — accepted as a known limitation, see
+   above. Revisit only if Tier 0 testing shows a concrete FP-assessment
+   quality problem traceable to it.
+2. **MCP tooling** — the user reported connecting Elasticsearch and TheHive
+   MCP tools to this session for live read-only verification during Phase G,
+   but neither was found registered in the session's available tools when
+   searched for. Phase G proceeded from the architecture doc's confirmed
+   spec instead. Worth confirming the MCP connection before any future work
+   that specifically needs live-instance verification (e.g. confirming
+   TheHive's actual alert query shape for `search_fp_history`/
+   `thehive_fp_history` against the real API, which is currently built from
+   the same unverified convention as the pre-existing `search_open_cases`/
+   `search_closed_cases` functions — those already carry a documented
+   "UNVERIFIED against the live TheHive instance" caveat for the write-path
+   functions in the same module; the v1 query-endpoint shape used by all of
+   `search_open_cases`/`search_closed_cases`/`search_fp_history` has not
+   itself been confirmed against a live 5.6.1 instance the way
+   `get_full_alert_with_analysis` was).
+3. **Suricata rules file staleness** — `SURICATA_RULES_PATH` defaults to a
+   single combined file (`/opt/so/rules/nids/suri/all.rules`); no code in
+   this repo reloads it, so a long-running service process will serve stale
+   `detection_rule_lookup` results if the file is updated on disk after
+   startup. Not addressed this session — flagging since it wasn't raised
+   before and could matter for the eventual n8n-connected deployment.
+4. **`PERCEPTION_MAX_TOOL_CALLS` = 6 is a hard ceiling, not a true budget** —
+   the prompt tells Agent 1 to use at most 6 calls matching the 6 available
+   tools, meaning there is zero slack for a retry (the prompt's own "retry
+   ONCE on wrong parameter name" instruction) without exceeding it. Not
+   changed this session since it wasn't asked for; noting in case retries in
+   practice turn out to need the failed attempt not to count against the
+   budget.
+
+Phase G, D, E, and F are now complete against the v3-final build order. Only
+Phase G's original scope (already built) and these four open items remain
+outstanding for a future session.
