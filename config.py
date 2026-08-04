@@ -54,6 +54,7 @@ class Settings:
     redis_url: str | None = field(default_factory=lambda: os.environ.get("REDIS_URL") or None)
 
     sigma_rules_path: str = field(default_factory=lambda: os.environ.get("SIGMA_RULES_PATH", "/opt/so/rules/sigma"))
+    suricata_rules_path: str = field(default_factory=lambda: os.environ.get("SURICATA_RULES_PATH", "/opt/so/rules/nids/suri/all.rules"))
 
     max_tool_calls_new: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_NEW", "8")))
     max_tool_calls_merge: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_MERGE", "5")))
@@ -87,6 +88,7 @@ QDRANT_EMBEDDING_MODEL: str = settings.qdrant_embedding_model
 REDIS_URL: str | None = settings.redis_url
 
 SIGMA_RULES_PATH: str = settings.sigma_rules_path
+SURICATA_RULES_PATH: str = settings.suricata_rules_path
 
 AGENT1_MAX_ITERATIONS_NEW: int = settings.max_tool_calls_new
 AGENT1_MAX_ITERATIONS_MERGE: int = settings.max_tool_calls_merge
@@ -134,6 +136,9 @@ if __name__ == "__main__":
 
     print("Sigma rules")
     print(f"  SIGMA_RULES_PATH     = {SIGMA_RULES_PATH}")
+
+    print("Suricata rules")
+    print(f"  SURICATA_RULES_PATH  = {SURICATA_RULES_PATH}")
 
     print("Tunables")
     print(f"  AGENT1_MAX_ITERATIONS_NEW   = {AGENT1_MAX_ITERATIONS_NEW}")

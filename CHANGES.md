@@ -321,7 +321,7 @@ None — no new external services were wired up this session.
 - [ ] `nodes/case_action.py`'s TheHive write functions (`promote_alert_to_case`, `update_case`, `add_case_comment`, `update_alert_status`, `add_alert_comment`, `merge_alert_into_case`) are implemented from TheHive 5's documented v1 REST API shape, not verified against the live 5.6.1 instance — this module is a stub, not wired into anything that would exercise it against production. Verify the exact endpoint paths against the live Swagger UI before wiring this into a real approval flow. (The alert `status` enum question specifically is resolved — `close_fp` correctly uses `"Ignored"`, verified against the live UI.)
 - [ ] `nodes/case_action.py` is not wired into `graph.py`/`main.py` — intentional per Phase 8 scope, but means there's currently no code path that actually calls it outside tests. Wiring it in (behind an approval gate) is future work, not scoped to any phase yet.
 - [x] ~~Whether agent-service runs on the same host as cortex-mcp~~ — resolved: it doesn't (172.20.24.224 vs 172.20.24.221), which is exactly why Phase 4 was reverted.
-- [ ] **Zero test coverage:** `tools/cortex.py`, `tools/elasticsearch.py`, `tools/itop.py`, `tools/registry.py`, `tools/sigma_rules.py`, `prompts/perceiver.py`. See Phase 10's coverage audit above for detail. Not filled in this session per explicit instruction not to pad the test count speculatively — flagged here so the gap is visible, not silently accepted.
+- [ ] **Zero test coverage:** `tools/cortex.py`, `tools/elasticsearch.py`, `tools/itop.py`, `tools/registry.py`, `prompts/perceiver.py`. See Phase 10's coverage audit above for detail. Not filled in this session per explicit instruction not to pad the test count speculatively — flagged here so the gap is visible, not silently accepted. (`tools/sigma_rules.py` was in this list at Phase 10 — it's now `tools/detection_rules.py` with 12 tests, added as a side effect of Phase B's rename+extension, not a dedicated coverage pass.)
 - [ ] **Partial test coverage:** `tools/thehive.py` — only `get_full_alert_with_analysis` is directly tested; `search_open_cases`, `search_closed_cases`, `get_case_full`, and all 6 Phase 8 write functions have no direct test (the write functions are only exercised indirectly, via mocks, by `test_case_action.py`).
 - [x] ~~`SOC-3s-ARCHITECTURE-v2.md` §12 (Schemas) has drifted significantly from `schemas.py`~~ — **fixed in the post-Phase-10 cleanup commit** (see below): §12 rewritten field-for-field against the actual `schemas.py`, and `PerceptionResult` (confirmed dead — referenced nowhere outside its own definition) removed from `schemas.py` itself, not just documented as gone.
 - [ ] **`SOC-3s-ARCHITECTURE-v2.md` §15 (File Tree) is stale throughout** — never updated as phases completed, unlike §19. Don't use it as a source of truth for what's done; use §19 instead.
@@ -735,3 +735,71 @@ the files this phase touches.
 
 117/117 tests passing (112 before this phase, 5 net new). Syntax check and
 import check also passed manually.
+
+## Phase B — rename and extend detection_rules.py
+
+`tools/sigma_rules.py` → `tools/detection_rules.py` (deleted the old file, not
+a `git mv` — content changed enough that a straight rename didn't make sense).
+Public entry point is now `get_rule_source(rule_uuid, source_engine=None) ->
+dict`, dispatching per §11's confirmed order: explicit `source_engine` hint
+routes straight to that engine's lookup; no hint tries Sigma YAML → Suricata
+`.rules` metadata → YARA graceful return, in that order, returning on the
+first `found: true`.
+
+**Suricata parser** (`_get_suricata_rule_source`/`_extract_suricata_rule`),
+built from §7's confirmed rule format and parser logic: scans
+`SURICATA_RULES_PATH` (new setting, default `/opt/so/rules/nids/suri/all.rules`
+— a single combined file, not a per-rule directory like Sigma) line by line,
+skips lines starting with `#` (disabled rules), matches on the literal
+`sid:{uuid};` substring (the trailing `;` boundary prevents partial-number
+false positives — e.g. a lookup for `"10665"` cannot match `sid:2010665;` —
+tested explicitly). Extracts `msg:"..."` as title and parses the `metadata:`
+block (comma-separated `key value` pairs) for `mitre_technique_id`/`_name`,
+`mitre_tactic_id`/`_name`. Missing MITRE metadata is treated as a normal,
+common, non-error case (confirmed: only 50.2% of active rules have it) —
+returns `found: true` with empty `mitre_attack`/`mitre_tactics` lists, not an
+error or a gap marker.
+
+**YARA graceful return** (`_get_yara_rule_source`): always `found: false` with
+empty MITRE lists and an explanatory `error` string, never raises — YARA rules
+have no centrally indexed lookup-by-UUID mechanism and no native MITRE tagging
+convention (confirmed via the `strelka.file` ingest pipeline research from
+Phase A). `source_engine="strelka"` is accepted as an alias and routes here
+too, since Strelka is the YARA execution engine, not a separate rule format.
+
+**Sigma path unchanged in behavior**, just moved and given a `source_engine:
+"sigma"` field in its output dict for consistency with the other two engines
+(the existing dict shape didn't have this field before — nothing consumed it,
+so this is purely additive).
+
+**Fixed two broken references discovered while making this change, not just
+the rename itself:**
+- `tools/registry.py`'s `sigma_rule_lookup` tool wrapper imported from the
+  deleted module — updated the import, left the tool's name/signature
+  unchanged (splitting/renaming the tool itself into `detection_rule_lookup`
+  is Phase C's job, per §13, not this one).
+- `nodes/perceive.py`'s `_extract_techniques_from_rule()` (the deterministic
+  fallback used when Agent 1's LLM output doesn't parse) also imported
+  directly from the deleted module — updated the import, **and** fixed a real
+  behavioral gap this exposed: it was reading `rule.get("tags", [])`, a
+  Sigma-only field. Suricata's output dict has no `tags` key at all — it would
+  have silently returned an empty technique set for every Suricata-sourced
+  fallback lookup. Switched to `rule.get("mitre_attack", [])`, which both
+  engines' output dicts populate (Sigma: raw `"attack.txxxx"` tag strings;
+  Suricata: bare `"Txxxx"` IDs) — `MITRE_TECHNIQUE_RE`'s `(?:attack\.)?` prefix
+  is already optional, so the same extraction regex handles both forms
+  without new branching. Also now passes `alert.source_engine` as the
+  `source_engine` hint, avoiding the full fallback-chain walk when the engine
+  is already known.
+
+`tests/test_detection_rules.py` — **new, this module had zero test coverage
+before this phase** (flagged in Phase 10's audit): 12 tests — Suricata with
+MITRE metadata, without it (not an error), a commented rule correctly skipped,
+an unknown SID, the sid-boundary false-positive case explicitly, a missing
+rules file, YARA's graceful return, the `strelka` alias, both no-hint dispatch
+paths (finds via Suricata when Sigma misses; falls all the way through to
+YARA when nothing matches), and baseline Sigma found/not-found coverage (also
+previously untested).
+
+129/129 tests passing (117 before this phase, 12 net new). Syntax check,
+import check, and `tools.registry` tool listings also verified manually.

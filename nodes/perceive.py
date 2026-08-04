@@ -12,8 +12,8 @@ from langgraph.prebuilt import create_react_agent
 from config import DEDUP_WINDOW_SECONDS, REDIS_URL, settings
 from prompts.perceiver import build_prompt
 from schemas import CanonicalAlert, CorrelationResult, MitreMapping, TriageState
+from tools.detection_rules import get_rule_source
 from tools.registry import PERCEPTION_TOOLS
-from tools.sigma_rules import get_rule_source
 from tools.thehive import search_open_cases
 
 logger = logging.getLogger("agent-service.perceive")
@@ -309,10 +309,15 @@ def _extract_techniques_from_rule(alert: CanonicalAlert) -> set[str]:
     uuid = alert.rule.uuid if alert.rule else ""
     if not uuid:
         return set()
-    rule = get_rule_source(uuid)
+    # source_engine hint avoids the full Sigma-then-Suricata-then-YARA fallback
+    # chain when we already know which engine fired. get_rule_source() returns
+    # "mitre_attack" in both the Sigma ("attack.txxxx" tag strings) and
+    # Suricata (bare "Txxxx" IDs from metadata) shapes — MITRE_TECHNIQUE_RE
+    # below matches both forms, so no per-engine branching is needed here.
+    rule = get_rule_source(uuid, alert.source_engine)
     if not rule or not rule.get("found"):
         return set()
-    return _extract_techniques_from_tags(rule.get("tags", []) or [])
+    return _extract_techniques_from_tags(rule.get("mitre_attack", []) or [])
 
 
 def _extract_techniques_from_tags(tags: list[str]) -> set[str]:

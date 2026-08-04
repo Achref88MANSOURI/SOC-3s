@@ -6,7 +6,7 @@ from tools.cortex import analyze_observable as _cortex_analyze
 from tools.elasticsearch import query_related_alerts, query_process_history, query_connection_history
 from tools.itop import lookup_asset as _itop_lookup
 from tools.qdrant import retrieve_mitre, retrieve_playbooks, retrieve_cve
-from tools.sigma_rules import get_rule_source as _sigma_rule
+from tools.detection_rules import get_rule_source as _detection_rule
 from tools.thehive import search_open_cases, search_closed_cases, get_case_full
 
 
@@ -66,7 +66,7 @@ def thehive_search(query_type: str, observables: str = "", host: str = "", user:
 @tool
 def sigma_rule_lookup(rule_uuid: str) -> dict:
     """Look up a Sigma rule by UUID from the local filesystem. Returns description, FP conditions, MITRE tags."""
-    return _sigma_rule(rule_uuid)
+    return _detection_rule(rule_uuid)
 
 
 @tool
