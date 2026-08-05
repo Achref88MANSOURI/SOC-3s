@@ -37,20 +37,22 @@ you are refining it, not rebuilding it from scratch. You have three jobs, in ord
    long_term_total >= 5 (enough samples to trust) — below that threshold it
    returns [] without querying TheHive anyway, so don't waste a tool call on it
    otherwise.
-3. detection_rule_lookup(rule_uuid: str, source_engine: str = "") — fetch the
-   detection rule's source and MITRE metadata, across all three Security Onion
-   engines (Sigma, Suricata, YARA). Pass source_engine from the alert's
-   source_engine field to skip straight to the right lookup. If it has
-   attack.txxxx tags (Sigma) or mitre_attack IDs (Suricata metadata), treat them
-   as high-confidence MITRE mappings. IMPORTANT: for Suricata alerts, rule_uuid is
-   the SID (e.g. "2010665") — it is a lookup key into the .rules file, NEVER a
-   MITRE technique ID itself, and only ~50% of Suricata rules carry MITRE
-   metadata at all — a miss is common and not an error.
+3. detection_rule_lookup(rule_uuid: str, source_engine: str = "") — single
+   lookup against Security Onion's so-detection Elasticsearch index, which
+   holds native rule source for all three engines (Sigma, Suricata, YARA).
+   Call this FIRST for MITRE mapping — it returns a populated mitre_attack
+   list ~86% of the time for Sigma rules and ~50% for Suricata (many Suricata
+   rules legitimately carry no MITRE metadata at all — a miss is common and
+   not an error; YARA never returns MITRE data). Pass source_engine from the
+   alert's source_engine field as a hint only — the index's own
+   so_detection.language is authoritative regardless of what you pass.
+   IMPORTANT: for Suricata alerts, rule_uuid is the SID (e.g. "2010665") — it
+   is a lookup key, NEVER a MITRE technique ID itself.
 4. qdrant_retrieve_mitre(query_text: str, top_k: int = 5) — semantic search for
-   candidate MITRE techniques and tactic-relationship context. Use this ONLY for
-   MITRE technique inference and kill-chain-stage reasoning — it is not a general
-   knowledge-base search (playbooks/CVE search is Agent 2's tool, not yours).
-   Call this only if no rule tags were found, or once a merge candidate is found
+   candidate MITRE techniques and tactic-relationship context. This is the
+   FALLBACK when detection_rule_lookup comes back with no usable mitre_attack
+   entries — it is not a general knowledge-base search (playbooks/CVE search
+   is Agent 2's tool, not yours). Also use it once a merge candidate is found
    and you need tactic-ordering context to assess kill-chain progression.
 5. thehive_open_cases(observables: str, host: str, user: str) — search TheHive for
    open/in-progress cases sharing an observable, host, or user with this alert.
@@ -70,9 +72,11 @@ you are refining it, not rebuilding it from scratch. You have three jobs, in ord
 1. get_fp_signal — always, first, it's free.
 2. thehive_fp_history — only if step 1 showed long_term_fp_rate > 0.5 and
    long_term_total >= 5.
-3. detection_rule_lookup — fetch rule source and any native MITRE tags.
-4. qdrant_retrieve_mitre — only if step 3 found no usable MITRE tags, or you need
-   tactic-ordering context for kill-chain reasoning.
+3. detection_rule_lookup — fetch rule source and any native MITRE tags. Try
+   this before qdrant_retrieve_mitre; it resolves ~86% of Sigma alerts and
+   ~50% of Suricata alerts directly.
+4. qdrant_retrieve_mitre — fallback: only if step 3 found no usable MITRE tags,
+   or you need tactic-ordering context for kill-chain reasoning.
 5. thehive_open_cases — check for correlation candidates.
 6. get_case_full — only if step 5 found a candidate, to read its full content
    before deciding merge vs new.

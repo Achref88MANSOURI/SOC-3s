@@ -1,5 +1,5 @@
 # SOC-3s Agent Service — Change Log
-Last updated: 2026-08-02
+Last updated: 2026-08-05
 
 ## Phases completed
 - [x] Phase 1 — Bug fixes (already resolved by a prior uncommitted session — see below)
@@ -1182,3 +1182,127 @@ deletion criteria.
 Phase G, D, E, and F are now complete against the v3-final build order. Only
 Phase G's original scope (already built) and these four open items remain
 outstanding for a future session.
+
+Note: open item 4 above (`PERCEPTION_MAX_TOOL_CALLS` = 6, zero retry slack)
+was resolved by the pre-Tier-0 fix immediately following this phase — bumped
+to 7. See git commit `90e59ef`.
+
+## Post-Phase-F — `detection_rule_lookup` rewritten to use Elasticsearch, not the filesystem
+
+**What changed and why.** Phase B built `tools/detection_rules.py` to read
+Sigma YAML from `SIGMA_RULES_PATH` and scan Suricata's `all.rules` file for
+`sid:NNNN;` lines. Live investigation of the deployment found this could
+never fully work: the files under `/opt/so/rules/elastalert/rules/*.yml` are
+**compiled ElastAlert2 output**, not native Sigma — they use
+`detection_public_id` instead of `id`, an `eql:` filter instead of
+`detection:`, and the MITRE `tags:` field is **stripped during compilation**.
+That path could never yield MITRE mappings for Sigma alerts, no matter how
+the parser was tuned.
+
+Security Onion turns out to store the full native source for **all three**
+detection engines — Sigma, Suricata, YARA — in one Elasticsearch index,
+`so-detection` (74,888 docs, confirmed live), with unmodified rule source in
+`so_detection.content` and tags intact. `tools/detection_rules.py` now issues
+one query against that index (`term` match on `so_detection.publicId`,
+matching `rule.uuid` exactly across all three engines: UUID for Sigma, SID
+for Suricata, rule name for YARA) and dispatches MITRE parsing on the index's
+own `so_detection.language` field — never on the caller's `source_engine`
+hint, which is now accepted for call-site compatibility only. Reused
+`tools/elasticsearch.py`'s existing `_es_post`/`_headers` client directly —
+no second ES connection was created.
+
+**Confirmed MITRE coverage** (verified two independent ways — wildcard and
+strict-regexp queries returning the same count, plus a manual check that all
+10 of the highest-volume rules actually firing on this deployment carry
+technique IDs):
+
+| Engine | Total | Enabled | With MITRE | Coverage |
+|--------|-------|---------|-----------|----------|
+| Sigma | 3,338 | 1,819 | 2,888 | **86.5%** |
+| Suricata | 67,229 | 51,476 | ~50% (file-based count) | ~50% |
+| YARA | 4,321 | 4,321 | 0 | 0% — no native tagging |
+
+**Correction — the earlier ~19% Sigma coverage figure.** This project
+previously referenced a ~19% Sigma MITRE coverage figure. Before writing this
+entry I searched the current repo (`CHANGES.md`, `SOC-3s-ARCHITECTURE-v3-final.md`)
+and the full git history (`git log --all -S "19%"`, `git log --all -S
+"securityonion-resources"`) for where that number was recorded — both came
+back empty. It isn't written anywhere in this repo's committed history, so
+there is no specific prior sentence to point at and correct. What can be
+said with confidence: that figure, wherever it originated, was measured
+against `/opt/so/conf/sigma/repos/securityonion-resources/` (26 rules — SO's
+own IDH/monitoring detections), not the deployment's real ruleset. The actual
+ruleset in use is `all_rules` (the full community set), against which
+coverage is 86.5%, not ~19%. The corrected figure and its provenance are now
+recorded in `SOC-3s-ARCHITECTURE-v3-final.md` §1 and §7 so it doesn't
+resurface.
+
+**Sigma tag parsing — four namespaces, not two.** `attack.t####[.###]` →
+technique (normalized uppercase, e.g. `T1003.001`), `attack.g####` → ATT&CK
+Group (`G0069`), `attack.s####` → ATT&CK Software (`S0002`), any other
+`attack.*` → tactic (kept as a free-form string — SigmaHQ uses non-canonical
+names like `attack.stealth`/`attack.defense-impairment` in practice, so
+tactic strings are never validated against a hardcoded enum). Non-`attack.*`
+tags (e.g. `detection.emerging-threats`) are filtered out entirely.
+
+**Real Suricata parser bug fixed.** Phase B's metadata parser used a flat
+`dict[str, str]`, so a rule with more than one `mitre_technique_id` entry
+would silently keep only the last one. Rewritten to `dict[str, list[str]]`
+(`setdefault(key, []).append(value)`), collecting all values per key. Same
+regex-based extraction from the `metadata:` block as Phase B, unchanged — the
+only difference is the input now comes from `so_detection.content` rather
+than a line scanned out of `all.rules`.
+
+**Return-shape reconciliation.** The rewrite spec's field-extraction list
+(status/date/modified/logsource for Sigma; tactic names for Suricata) named
+more fields than its literal return-dict listing enumerated. Resolved by
+treating the extraction list as the floor and including all of it —
+`tools/detection_rules.py::_parse_sigma` returns `status`, `date`,
+`modified`, `logsource` beyond the documented shape, and `_parse_suricata`
+returns `mitre_tactic_names` — documented inline in the code where each
+extra field is added, rather than silently dropping fields that were
+explicitly asked for.
+
+**`tools/registry.py`'s `detection_rule_lookup` docstring updated** to
+describe the new ES-backed lookup and its coverage numbers, and to state it
+should be Agent 1's first call for MITRE mapping — confirmed with the user
+before editing (this tool's docstring wasn't originally listed as in-scope
+for this task).
+
+**`prompts/perceiver.py`** updated to match: `detection_rule_lookup` is now
+documented as the primary MITRE source (call it before
+`qdrant_retrieve_mitre`, which is now the genuine fallback), with the real
+coverage numbers instead of generic guidance.
+
+**Removed:** all filesystem-walking/YAML-file-opening/`all.rules`-scanning
+code from `tools/detection_rules.py`; `SIGMA_RULES_PATH` and
+`SURICATA_RULES_PATH` from `config.py` (`Settings` fields, module-level
+exports, and the `__main__` diagnostic print block).
+
+**Not touched — user's responsibility, flagged not performed:**
+- Removing `SIGMA_RULES_PATH`/`SURICATA_RULES_PATH` from `.env`.
+- Removing the hourly rsync cron job on the agent-service VM that synced
+  Sigma/Suricata rule files to this service — now fully obsolete, since
+  nothing reads from the filesystem path anymore.
+- Open item 3 from the Phase F entry above ("Suricata rules file staleness
+  — no reload on a long-running process") is now moot: there is no longer a
+  file to go stale. Superseded by this change, not separately resolved.
+
+**Tests:** `tests/test_detection_rules.py` fully replaced (10 ES-mocked
+tests: all four Sigma tag namespaces, non-standard tactic acceptance,
+sub-technique normalization, Suricata with/without MITRE, YARA graceful
+empty return, unknown `publicId`, ES timeout/error with no raise,
+`source_engine` hint disagreeing with `so_detection.language` — language
+wins, and a query-shape assertion). Uses the live-verified LSASS
+credential-access rule (`ffa6861c-4461-4f59-8a41-578c39f3f23e`) as the
+primary fixture.
+
+`pytest tests/ -v`: **154/154 passing** (was 156/156 at the end of Phase F —
+the 2 fewer tests reflects `test_detection_rules.py`'s full replacement, not
+a coverage loss; the new file's 10 tests target the same contract with
+ES-mock fixtures instead of filesystem fixtures).
+
+Docs updated: `SOC-3s-ARCHITECTURE-v3-final.md` §1 (rename/rewrite history +
+19% correction), §7 (full rewrite — ES query, per-engine parsing, coverage
+table, return shape), §11 (tool inventory entry), §12 (tech-stack table, new
+row for detection rule source).

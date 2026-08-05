@@ -58,16 +58,18 @@ def thehive_search_closed(observables: str = "", rule_uuid: str = "") -> list:
 
 @tool
 def detection_rule_lookup(rule_uuid: str, source_engine: str = "") -> dict:
-    """Look up a detection rule's source and MITRE ATT&CK metadata by UUID,
-    across all three Security Onion engines. Pass source_engine ('sigma',
-    'suricata', or 'yara'/'strelka') if known — the alert's source_engine field
-    tells you this — to skip straight to the right lookup. If omitted, tries
-    Sigma YAML, then Suricata .rules metadata, then falls back to YARA's
-    graceful "no lookup mechanism exists" response. Suricata and Sigma results
-    include a `mitre_attack` list of technique IDs when the rule has them —
-    absence is common and not an error (only ~50% of Suricata rules carry
-    MITRE metadata). YARA never returns a real lookup — it has no
-    centrally indexed rule source or native MITRE tagging convention."""
+    """Look up a detection rule's source and MITRE ATT&CK metadata by UUID.
+    Single query against Security Onion's so-detection Elasticsearch index,
+    which holds the native rule source for all three engines (Sigma,
+    Suricata, YARA) — call this FIRST for MITRE mapping, before
+    qdrant_retrieve_mitre. source_engine is optional and only a hint; the
+    index's own so_detection.language field is authoritative regardless of
+    what you pass. Coverage: Sigma rules return a populated `mitre_attack`
+    list ~86% of the time; Suricata ~50% (many legitimately have no MITRE
+    metadata at all — not an error). YARA never returns MITRE data — it has
+    no native tagging convention — but still returns title/description/
+    author. Use qdrant_retrieve_mitre as the fallback when this comes back
+    with no usable mitre_attack entries."""
     return _detection_rule(rule_uuid, source_engine or None)
 
 

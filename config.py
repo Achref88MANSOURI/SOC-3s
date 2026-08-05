@@ -53,9 +53,6 @@ class Settings:
 
     redis_url: str | None = field(default_factory=lambda: os.environ.get("REDIS_URL") or None)
 
-    sigma_rules_path: str = field(default_factory=lambda: os.environ.get("SIGMA_RULES_PATH", "/opt/so/rules/sigma"))
-    suricata_rules_path: str = field(default_factory=lambda: os.environ.get("SURICATA_RULES_PATH", "/opt/so/rules/nids/suri/all.rules"))
-
     fp_db_path: str = field(default_factory=lambda: os.environ.get("FP_DB_PATH", "./data/fp_events.db"))
 
     max_tool_calls_new: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_NEW", "8")))
@@ -88,9 +85,6 @@ QDRANT_COLLECTION: str = settings.qdrant_collection
 QDRANT_EMBEDDING_MODEL: str = settings.qdrant_embedding_model
 
 REDIS_URL: str | None = settings.redis_url
-
-SIGMA_RULES_PATH: str = settings.sigma_rules_path
-SURICATA_RULES_PATH: str = settings.suricata_rules_path
 
 FP_DB_PATH: str = settings.fp_db_path
 
@@ -137,12 +131,6 @@ if __name__ == "__main__":
 
     print("Redis")
     print(f"  REDIS_URL            = {REDIS_URL if REDIS_URL else '(not set — Redis disabled)'}")
-
-    print("Sigma rules")
-    print(f"  SIGMA_RULES_PATH     = {SIGMA_RULES_PATH}")
-
-    print("Suricata rules")
-    print(f"  SURICATA_RULES_PATH  = {SURICATA_RULES_PATH}")
 
     print("FP tracking")
     print(f"  FP_DB_PATH           = {FP_DB_PATH}")

@@ -1,145 +1,182 @@
 from __future__ import annotations
 
-import os
 import re
-from pathlib import Path
 
+import requests
 import yaml
 
-from config import SIGMA_RULES_PATH, SURICATA_RULES_PATH
+from tools.elasticsearch import _es_post
 
-# Suricata: matches the sid on its own line-scoped boundary. sid is Emerging
-# Threats' own sequential rule identifier, NOT a MITRE technique ID — it is
-# used purely as the lookup key into the rules file. The real MITRE data, when
-# present, lives in that same rule's `metadata:` block as separate key-value
-# pairs. See SOC-3s-ARCHITECTURE-v3-final.md §7 for the confirmed rule format
-# and the "critical correction" this reflects.
+# Security Onion indexes the full native source for all three detection
+# engines (Sigma, Suricata, YARA) in one index, keyed by so_detection.publicId
+# — a UUID for Sigma, the Emerging Threats SID for Suricata, and the rule name
+# itself for YARA. This replaces Phase B's filesystem approach: the files
+# under /opt/so/rules/elastalert/rules/*.yml are compiled ElastAlert2 output,
+# not native Sigma, and strip the MITRE tags: field during compilation — that
+# path could never yield MITRE mappings. so-detection has the unmodified
+# native source with tags intact.
+SO_DETECTION_INDEX = "so-detection"
+
+# Suricata: sid is Emerging Threats' own sequential rule identifier, NOT a
+# MITRE technique ID — it's used purely as the lookup key. The real MITRE
+# data, when present, lives in the rule's `metadata:` block as key-value
+# pairs. Regexes unchanged from Phase B; only the input changed (the
+# so_detection.content field string, not a line read from a rules file).
 MSG_RE = re.compile(r'msg:"([^"]*)"')
 METADATA_RE = re.compile(r"metadata:([^;]*);")
 
-_MITRE_METADATA_KEYS = ("mitre_technique_id", "mitre_technique_name", "mitre_tactic_id", "mitre_tactic_name")
+# Sigma tags use four distinct attack.* namespaces (SOC-3s-ARCHITECTURE-v3-final.md,
+# live-verified): attack.t#### / attack.t####.### (technique/sub-technique),
+# attack.g#### (ATT&CK Group), attack.s#### (ATT&CK Software), and anything
+# else under attack.* (tactic — kept as-is, including non-canonical names like
+# "stealth" or "defense-impairment" that SigmaHQ uses in practice; techniques
+# are the authoritative field, tactics are advisory strings, never validated
+# against a hardcoded enum). Tags outside the attack.* namespace entirely
+# (e.g. detection.emerging-threats) are ignored.
+_TECHNIQUE_RE = re.compile(r"^t(\d{4}(?:\.\d{3})?)$", re.IGNORECASE)
+_GROUP_RE = re.compile(r"^g(\d{4})$", re.IGNORECASE)
+_SOFTWARE_RE = re.compile(r"^s(\d{4})$", re.IGNORECASE)
 
 
 def get_rule_source(rule_uuid: str, source_engine: str | None = None) -> dict:
-    """Look up a detection rule's source and MITRE metadata by UUID, across all
-    three Security Onion detection engines. If source_engine is given, dispatch
-    straight to that engine's lookup. Otherwise try each in turn: Sigma YAML ->
-    Suricata .rules metadata -> YARA graceful return (per
-    SOC-3s-ARCHITECTURE-v3-final.md §11's confirmed dispatch order)."""
-    engine = (source_engine or "").lower()
+    """Fetch detection rule source from Security Onion's so-detection index.
 
-    if engine == "sigma":
-        return _get_sigma_rule_source(rule_uuid)
-    if engine == "suricata":
-        return _get_suricata_rule_source(rule_uuid)
-    if engine in ("yara", "strelka"):
-        return _get_yara_rule_source(rule_uuid)
+    Covers Sigma, Suricata, and YARA — all three live in the same index with
+    the same schema. rule_uuid matches so_detection.publicId directly for all
+    three engines (UUID / SID string / YARA rule name respectively).
 
-    result = _get_sigma_rule_source(rule_uuid)
-    if result.get("found"):
-        return result
-    result = _get_suricata_rule_source(rule_uuid)
-    if result.get("found"):
-        return result
-    return _get_yara_rule_source(rule_uuid)
-
-
-def _get_sigma_rule_source(rule_uuid: str) -> dict:
-    rules_dir = Path(SIGMA_RULES_PATH)
-    if not rules_dir.is_dir():
-        return {
-            "found": False,
-            "source_engine": "sigma",
-            "error": f"Sigma rules directory not found: {SIGMA_RULES_PATH}",
-            "rule_uuid": rule_uuid,
-        }
-
-    for root, _dirs, files in os.walk(rules_dir):
-        for fname in files:
-            if not fname.endswith((".yml", ".yaml")):
-                continue
-            fpath = os.path.join(root, fname)
-            try:
-                with open(fpath, "r") as f:
-                    data = yaml.safe_load(f)
-                if not isinstance(data, dict):
-                    continue
-                if data.get("id", "").strip() == rule_uuid.strip():
-                    return _extract_sigma_rule(data)
-            except (yaml.YAMLError, OSError):
-                continue
-
-    return {
-        "found": False,
-        "source_engine": "sigma",
-        "error": f"No Sigma rule found with UUID '{rule_uuid}'",
-        "rule_uuid": rule_uuid,
-    }
-
-
-def _extract_sigma_rule(data: dict) -> dict:
-    tags = data.get("tags", []) or []
-    return {
-        "found": True,
-        "source_engine": "sigma",
-        "title": data.get("title", ""),
-        "description": data.get("description", ""),
-        "id": data.get("id", ""),
-        "level": data.get("level", ""),
-        "status": data.get("status", ""),
-        "falsepositives": data.get("falsepositives", []),
-        "tags": tags,
-        "mitre_attack": [t for t in tags if t.startswith("attack.")],
-        "references": data.get("references", []),
-        "author": data.get("author", ""),
-        "detection": data.get("detection", {}),
-        "logsource": data.get("logsource", {}),
-    }
-
-
-def _get_suricata_rule_source(rule_uuid: str) -> dict:
-    rules_path = Path(SURICATA_RULES_PATH)
-    if not rules_path.is_file():
-        return {
-            "found": False,
-            "source_engine": "suricata",
-            "error": f"Suricata rules file not found: {SURICATA_RULES_PATH}",
-            "rule_uuid": rule_uuid,
-        }
-
-    sid_marker = f"sid:{rule_uuid};"
+    source_engine is accepted for call-site compatibility but is now only an
+    optional HINT — the index tells us the real language via
+    so_detection.language, and that is authoritative over the hint. It is not
+    used to alter the query or the dispatch.
+    """
     try:
-        with open(rules_path, "r", errors="replace") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if sid_marker in stripped:
-                    return _extract_suricata_rule(stripped, rule_uuid)
-    except OSError as e:
-        return {
-            "found": False,
-            "source_engine": "suricata",
-            "error": str(e),
-            "rule_uuid": rule_uuid,
-        }
+        result = _es_post(
+            f"/{SO_DETECTION_INDEX}/_search",
+            {"query": {"term": {"so_detection.publicId": rule_uuid}}, "size": 1},
+        )
+    except requests.exceptions.RequestException as e:
+        return {"found": False, "error": str(e)}
 
+    hits = result.get("hits", {}).get("hits", [])
+    if not hits:
+        return {"found": False, "public_id": rule_uuid}
+
+    doc = hits[0].get("_source", {}) or {}
+    so_detection = doc.get("so_detection", {}) or {}
+    language = (so_detection.get("language") or "").lower()
+
+    base = {
+        "found": True,
+        "source_engine": language,
+        "engine": so_detection.get("engine", ""),
+        "public_id": so_detection.get("publicId", rule_uuid),
+        "title": so_detection.get("title", ""),
+        "description": so_detection.get("description", ""),
+        "severity": so_detection.get("severity", ""),
+        "author": so_detection.get("author", ""),
+        "category": so_detection.get("category", ""),
+        "is_enabled": so_detection.get("isEnabled", False),
+        "ruleset": so_detection.get("ruleset", ""),
+        "product": so_detection.get("product"),
+    }
+
+    if language == "sigma":
+        extra = _parse_sigma(so_detection)
+    elif language == "suricata":
+        extra = _parse_suricata(so_detection.get("content", "") or "")
+    elif language == "yara":
+        extra = _parse_yara()
+    else:
+        extra = _empty_mitre_fields(note=f"Unrecognized so_detection.language: {language!r}")
+
+    base.update(extra)
+    return base
+
+
+def _empty_mitre_fields(note: str | None = None) -> dict:
     return {
-        "found": False,
-        "source_engine": "suricata",
-        "error": f"No Suricata rule found with SID '{rule_uuid}'",
-        "rule_uuid": rule_uuid,
+        "mitre_attack": [],
+        "mitre_tactics": [],
+        "mitre_groups": [],
+        "mitre_software": [],
+        "mitre_technique_names": [],
+        "falsepositives": [],
+        "level": None,
+        "references": [],
+        "note": note,
     }
 
 
-def _extract_suricata_rule(line: str, rule_uuid: str) -> dict:
+def _parse_sigma_tags(tags: list) -> dict:
+    techniques, tactics, groups, software = [], [], [], []
+    for tag in tags:
+        if not isinstance(tag, str) or not tag.lower().startswith("attack."):
+            continue
+        rest = tag[len("attack."):]
+
+        m = _TECHNIQUE_RE.match(rest)
+        if m:
+            techniques.append("T" + m.group(1).upper())
+            continue
+        m = _GROUP_RE.match(rest)
+        if m:
+            groups.append("G" + m.group(1))
+            continue
+        m = _SOFTWARE_RE.match(rest)
+        if m:
+            software.append("S" + m.group(1))
+            continue
+        tactics.append(rest)
+
+    return {
+        "mitre_attack": techniques,
+        "mitre_tactics": tactics,
+        "mitre_groups": groups,
+        "mitre_software": software,
+    }
+
+
+def _parse_sigma(so_detection: dict) -> dict:
+    content = so_detection.get("content", "") or ""
+    try:
+        parsed = yaml.safe_load(content) if content else None
+    except yaml.YAMLError:
+        parsed = None
+    parsed = parsed if isinstance(parsed, dict) else {}
+
+    tag_fields = _parse_sigma_tags(parsed.get("tags", []) or [])
+
+    return {
+        **tag_fields,
+        "mitre_technique_names": [],
+        "falsepositives": parsed.get("falsepositives", []) or [],
+        "level": parsed.get("level"),
+        "references": parsed.get("references", []) or [],
+        "note": None,
+        # Not in the tool's headline return-shape contract, but Sigma content
+        # carries this and dropping fields we were explicitly asked to
+        # extract (status/date/modified/logsource) rather than including
+        # them somewhere is worse than an unlisted-but-present key.
+        "status": parsed.get("status"),
+        "date": parsed.get("date"),
+        "modified": parsed.get("modified"),
+        "logsource": parsed.get("logsource", {}) or {},
+    }
+
+
+def _parse_suricata(content: str) -> dict:
     title = ""
-    m = MSG_RE.search(line)
+    m = MSG_RE.search(content)
     if m:
         title = m.group(1)
 
-    metadata: dict[str, str] = {}
-    m = METADATA_RE.search(line)
+    # Collect ALL values per key, not just the last — a rule can legitimately
+    # carry more than one mitre_technique_id/mitre_tactic_id pair. Phase B's
+    # original parser used a flat dict here and silently kept only the last
+    # value on a repeated key; fixed as part of this rewrite.
+    metadata: dict[str, list[str]] = {}
+    m = METADATA_RE.search(content)
     if m:
         for pair in m.group(1).split(","):
             pair = pair.strip()
@@ -147,46 +184,32 @@ def _extract_suricata_rule(line: str, rule_uuid: str) -> dict:
                 continue
             parts = pair.split(None, 1)
             if len(parts) == 2:
-                metadata[parts[0]] = parts[1]
-            # A metadata key with no value (malformed/unexpected) is skipped
-            # rather than guessed — matches the rest of this module's "no
-            # structured field is invented" discipline.
+                key, value = parts
+                metadata.setdefault(key, []).append(value)
 
-    # MISSING MITRE metadata is a valid, common, non-error case (confirmed:
-    # only 50.2% of active rules in this deployment have mitre_technique_id at
-    # all) — absence produces empty lists here, not an error or a gap marker.
-    mitre_attack = [metadata["mitre_technique_id"]] if metadata.get("mitre_technique_id") else []
-    mitre_tactics = [metadata["mitre_tactic_id"]] if metadata.get("mitre_tactic_id") else []
-
+    # MISSING MITRE metadata is a valid, common, non-error case — absence
+    # produces empty lists here, not an error or a gap marker.
     return {
-        "found": True,
-        "source_engine": "suricata",
         "title": title,
-        "rule_uuid": rule_uuid,
-        "mitre_attack": mitre_attack,
-        "mitre_tactics": mitre_tactics,
-        "mitre_technique_name": metadata.get("mitre_technique_name", ""),
-        "mitre_tactic_name": metadata.get("mitre_tactic_name", ""),
-        "metadata": metadata,
+        "mitre_attack": metadata.get("mitre_technique_id", []),
+        "mitre_tactics": metadata.get("mitre_tactic_id", []),
+        "mitre_groups": [],
+        "mitre_software": [],
+        "mitre_technique_names": metadata.get("mitre_technique_name", []),
+        "mitre_tactic_names": metadata.get("mitre_tactic_name", []),
+        "falsepositives": [],
+        "level": None,
+        "references": [],
+        "note": None,
     }
 
 
-def _get_yara_rule_source(rule_uuid: str) -> dict:
-    """YARA/Strelka rules have no centrally indexed, filesystem-lookup-by-UUID
-    mechanism the way Sigma (YAML directory) and Suricata (single .rules file
-    with a sid key) do, and no native MITRE tagging convention — confirmed via
-    Security Onion's own strelka.file ingest pipeline (arbitrary YARA rule meta
-    keys flatten to rule.{key}, so MITRE tagging is possible per-rule but never
-    structurally guaranteed). This is a graceful, always-empty return, not an
-    error — the caller should not treat this as a failed lookup."""
-    return {
-        "found": False,
-        "source_engine": "yara",
-        "error": "YARA/Strelka rules have no centrally indexed lookup by UUID; no native MITRE tagging mechanism exists for this engine",
-        "rule_uuid": rule_uuid,
-        "mitre_attack": [],
-        "mitre_tactics": [],
-    }
+def _parse_yara() -> dict:
+    """YARA has no native MITRE tagging convention — always an empty MITRE
+    result, not an error. title/description/author come from so-detection's
+    indexed fields directly (handled in the shared base dict), not re-parsed
+    from content's meta: block."""
+    return _empty_mitre_fields(note="YARA has no native MITRE tagging convention.")
 
 
 if __name__ == "__main__":

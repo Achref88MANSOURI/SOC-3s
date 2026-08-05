@@ -17,11 +17,34 @@ approach, same rejection of MCP for TheHive/Elasticsearch.
 owns open-case correlation and MITRE tag extraction. Agent 2 owns closed-case
 history, telemetry, and enrichment. No tool appears in both agents' lists.
 
-**`sigma_rule_lookup` renamed to `detection_rule_lookup`, extended to Suricata.**
-Suricata rules carry MITRE metadata too — confirmed 24,264 of 48,333 active
-signatures (50.2%) in this deployment's `/opt/so/rules/nids/suri/all.rules` have
-`mitre_technique_id` fields. YARA has no native tagging — handled with a graceful
-empty-return.
+**`sigma_rule_lookup` renamed to `detection_rule_lookup`, extended to Suricata,
+then moved from filesystem reads to a single Elasticsearch index.** Initially
+built to read Sigma YAML from `SIGMA_RULES_PATH` and scan Suricata's
+`all.rules` file directly (§7 below documents that phase's findings). Live
+investigation of the deployment then found a better source: Security Onion
+indexes the full native source for **all three engines** — Sigma, Suricata,
+YARA — in one Elasticsearch index, `so-detection` (74,888 docs), keyed by
+`so_detection.publicId` (UUID for Sigma, SID for Suricata, rule name for
+YARA). This superseded the filesystem approach entirely, for a decisive
+reason: the files under `/opt/so/rules/elastalert/rules/*.yml` are **compiled
+ElastAlert2 output**, not native Sigma — the MITRE `tags:` field is stripped
+during compilation, so that path could never yield MITRE mappings for Sigma
+alerts. `so-detection` holds the unmodified native source with tags intact.
+See §7 for the current implementation and confirmed coverage numbers
+(Sigma 86.5%, Suricata ~50%, YARA 0%). `SIGMA_RULES_PATH` / `SURICATA_RULES_PATH`
+and the rsync cron job that fed them are now obsolete.
+
+> **Correction:** an earlier finding in this project cited ~19% Sigma MITRE
+> coverage. That figure was measured against
+> `/opt/so/conf/sigma/repos/securityonion-resources/` (26 rules — SO's own
+> IDH/monitoring detections), not the deployment's actual ruleset. The real
+> ruleset in use is `all_rules` (the full community set), against which
+> coverage is 86.5% (2,888 of 3,338 rules, cross-checked with both a wildcard
+> and a strict regexp query, plus all 10 of the highest-volume rules actually
+> firing on this deployment individually confirmed to carry technique IDs).
+> That ~19% figure does not appear anywhere in this repo's committed history
+> and could not be traced to a specific prior document — it is corrected here
+> for the record.
 
 **`alert_builder.py` reads `event_data` directly, not regex over description text.**
 A live SO Sigma alert (captured from the actual n8n webhook payload) confirmed the
@@ -187,16 +210,57 @@ Parse failure → same deterministic entity-match logic the old `correlate.py` u
 
 ---
 
-## 7. `detection_rule_lookup` — Corrected Suricata Matching Logic
+## 7. `detection_rule_lookup` — Elasticsearch `so-detection` Source
 
-**Critical correction made mid-project, recorded here to prevent regression:**
-the Suricata `sid` field is **not** a MITRE ATT&CK technique ID. It is Emerging
-Threats' own sequential rule identifier (e.g. `sid:2522726`). It is used purely as
-the **lookup key** to find the correct line in the rules file — the actual MITRE
-data, when present, lives in that same rule's `metadata:` block as separate
-key-value pairs.
+**Current implementation.** `tools/detection_rules.py` issues one Elasticsearch
+query against the `so-detection` index and dispatches MITRE parsing on the
+index's own `so_detection.language` field — never on the caller-supplied
+`source_engine` hint, which is accepted for call-site compatibility only.
+Reuses `tools/elasticsearch.py`'s existing `_es_post`/`_headers` client; there
+is no second ES connection.
 
-**Confirmed real rule format** (pulled directly from this deployment):
+```
+POST /so-detection/_search
+{"query": {"term": {"so_detection.publicId": "<rule_uuid>"}}, "size": 1}
+```
+
+Every document holds the full native rule source (`so_detection.content`) plus
+metadata (`language`, `engine`, `title`, `severity`, `description`, `author`,
+`category`, `isEnabled`, `isCommunity`, `ruleset`, `product`, `license`,
+`sourceCreated`, `sourceUpdated`). `publicId` is the universal lookup key
+across all three engines and matches `rule.uuid` from the canonical alert
+exactly: a UUID for Sigma, the Emerging Threats SID for Suricata, and the rule
+name itself for YARA.
+
+### Sigma — parsed from `content` as YAML, `tags:` list
+
+Four distinct `attack.*` namespaces, confirmed against live production rules
+(e.g. the LSASS credential-access rule,
+`ffa6861c-4461-4f59-8a41-578c39f3f23e`):
+
+```yaml
+tags:
+    - attack.credential-access      # tactic — hyphens, not underscores
+    - attack.t1003.001              # technique/sub-technique -> T1003.001
+    - attack.g0069                  # ATT&CK Group -> G0069
+    - attack.s0002                  # ATT&CK Software -> S0002
+    - detection.emerging-threats    # NOT MITRE — different namespace, filtered out
+```
+
+Tactic names are **not** validated against a hardcoded ATT&CK tactic enum —
+SigmaHQ uses non-canonical names in practice (e.g. `attack.stealth`,
+`attack.defense-impairment` rather than the canonical `defense-evasion`).
+Techniques are the authoritative field; tactics are advisory strings. Also
+extracted from the parsed YAML: `falsepositives`, `level`, `references`,
+`logsource`, `status`, `date`, `modified`.
+
+### Suricata — same regex logic as the original filesystem phase, unchanged
+
+The `sid` field is **not** a MITRE ATT&CK technique ID — it's Emerging
+Threats' own sequential rule identifier, used purely as the lookup key. The
+real MITRE data, when present, lives in the same rule's `metadata:` block as
+separate key-value pairs, now read from `so_detection.content` instead of a
+line scanned out of `all.rules`:
 
 ```
 alert tcp ... (msg:"ET ACTIVEX ..."; ...; sid:2010665; rev:7;
@@ -205,32 +269,49 @@ mitre_tactic_name Initial_Access, mitre_technique_id T1190,
 mitre_technique_name Exploit_Public_Facing_Application;)
 ```
 
-**Confirmed a rule can legitimately have zero MITRE fields:**
+A rule can legitimately carry zero MITRE fields — not an error, an empty-list
+result. The parser also now collects **all** values per repeated metadata key
+(`dict[str, list[str]]`) rather than keeping only the last — a real bug in the
+original filesystem-phase parser, fixed as part of this rewrite, since a rule
+can carry more than one `mitre_technique_id`.
+
+### YARA — graceful empty return
+
+`so-detection` holds YARA source too, but YARA has no native MITRE tagging
+convention. Returns `found: true`, empty `mitre_attack`, and a `note`
+explaining the gap. `title`/`description`/`author` still come through from the
+index's own fields.
+
+### Confirmed coverage in this deployment
+
+| Engine | Total | Enabled | With MITRE | Coverage |
+|--------|-------|---------|-----------|----------|
+| Sigma | 3,338 | 1,819 | 2,888 | **86.5%** |
+| Suricata | 67,229 | 51,476 | ~50% (file-based count) | ~50% |
+| YARA | 4,321 | 4,321 | 0 | 0% — no native tagging |
+
+Sigma's 86.5% was verified two ways (wildcard `*attack.t*` and strict regexp
+`.*attack[.]t[0-9]{4}.*`, both returning 2,888) plus a manual check that all
+10 of the highest-volume rules actually firing on this deployment carry
+populated technique IDs. See the correction note in §1 regarding an earlier,
+inaccurate ~19% figure.
+
+### Return shape
 
 ```
-alert tcp [...] any -> $HOME_NET any (msg:"ET TOR Known Tor Relay/Router...";
-...; sid:2522726; rev:6172; metadata:affected_product Any,
-attack_target Any, deployment Perimeter, tag TOR,
-signature_severity Informational, created_at 2008_12_01, updated_at 2026_02_19;)
+{
+  "found": bool, "source_engine": str, "engine": str, "public_id": str,
+  "title": str, "description": str, "severity": str, "author": str,
+  "category": str, "is_enabled": bool, "ruleset": str, "product": str | None,
+  "mitre_attack": [...], "mitre_tactics": [...], "mitre_groups": [...],
+  "mitre_software": [...], "mitre_technique_names": [...],
+  "falsepositives": [...], "level": str | None, "references": [...],
+  "note": str | None,
+}
 ```
-
-**Confirmed coverage in this deployment:**
-- Total active rules: 48,333
-- Rules with `mitre_technique_id`: 24,264 (50.2%)
-
-### Parser logic
-
-1. Confirmed location: `/opt/so/rules/nids/suri/all.rules` (single combined file,
-   not a per-rule directory like Sigma).
-2. Scan lines for `sid:{rule_uuid};` — skip lines starting with `#` (disabled rules).
-3. On match, extract from that line:
-   - `msg:"..."` → title
-   - `metadata:` block → parse comma-separated key-value pairs for
-     `mitre_technique_id`, `mitre_technique_name`, `mitre_tactic_id`,
-     `mitre_tactic_name` (may be absent entirely — that's a valid, common case)
-4. Return `{"found": true, "source_engine": "suricata", "mitre_attack": [...],
-   "mitre_tactics": [...], ...}` — empty lists when metadata lacks MITRE fields,
-   not an error.
+No match → `{"found": false, "public_id": rule_uuid}`. ES error/timeout →
+`{"found": false, "error": "..."}` — never raises; Agent 1 degrades to
+`qdrant_retrieve_mitre` instead.
 
 ---
 
@@ -387,7 +468,10 @@ status (confirmed against live TheHive 5.6.1 — `"FP"` does not exist).
 ```
 tools/detection_rules.py    (renamed from sigma_rules.py)
   get_rule_source(rule_uuid, source_engine=None) -> dict
-  dispatches: Sigma YAML -> Suricata .rules metadata -> YARA graceful return
+  single ES query on so-detection index (so_detection.publicId), dispatches
+  on so_detection.language: Sigma YAML tags -> Suricata content metadata ->
+  YARA graceful return. Reuses tools/elasticsearch.py's client — no separate
+  ES connection. See §7.
 
 tools/thehive.py
   get_full_alert_with_analysis(alert_id)     # pre-agent, main.py
@@ -438,6 +522,7 @@ tools/fp_tracking.py         (NEW)
 | Vector DB | Qdrant, `BAAI/bge-m3` (1024-dim), `sentence-transformers`, `triage_kb` collection |
 | TheHive access | Raw `requests`, verified against 5.6.1 |
 | Elasticsearch access | Raw `requests`/`elasticsearch-py`, direct API, not MCP |
+| Detection rule source | Elasticsearch `so-detection` index (74,888 docs) — native Sigma/Suricata/YARA source, keyed by `publicId`. Not the filesystem — see §7. |
 | Cortex access | Raw `requests`, fallback-only in Agent 2 |
 | iTop access | Raw `requests`, JSON-RPC |
 | Case writes | Direct REST, post-approval gate, `"Ignored"` for FP |
