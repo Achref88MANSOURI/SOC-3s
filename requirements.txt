@@ -8,7 +8,6 @@ pydantic
 requests
 python-dotenv
 qdrant-client
-fastembed
 sentence-transformers
 redis
 pyyaml

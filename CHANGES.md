@@ -1306,3 +1306,96 @@ Docs updated: `SOC-3s-ARCHITECTURE-v3-final.md` §1 (rename/rewrite history +
 19% correction), §7 (full rewrite — ES query, per-engine parsing, coverage
 table, return shape), §11 (tool inventory entry), §12 (tech-stack table, new
 row for detection rule source).
+
+## Post-Phase-F — REPO-STATUS.md added, then a Tier-0-blocking bug it found was fixed
+
+A full read of every file in the repo (`nodes/`, `tools/`, `prompts/`,
+`tests/`, `scripts/`, top-level modules and docs) produced `REPO-STATUS.md` —
+a single current-state snapshot for the project owner ahead of connecting to
+live alerts, written from what the code actually does rather than from
+`CHANGES.md`'s own log. Confirmed directly rather than assumed: `pytest
+tests/ -v` → 154/154; branch `worktree-twinkly-hugging-hennessy` at the
+Elasticsearch-rewrite commit, in sync with `origin`.
+
+That read surfaced a real, previously untracked bug: **`scripts/ingest_qdrant.py`
+and `tools/qdrant.py` were structurally incompatible.** The ingestion script
+created three separate named Qdrant collections (`mitre_attack`, `cve`,
+`playbooks`), each with 384-dim vectors from `fastembed`'s
+`BAAI/bge-small-en`, and wrote a flat payload with no `metadata` nesting.
+`tools/qdrant.py` — the actual runtime path both agents use — queries a
+single collection (`QDRANT_COLLECTION`, default `triage_kb`) with 1024-dim
+vectors from `sentence-transformers`' `BAAI/bge-m3`, filtered on a
+`collection` payload field, reading structured fields from a nested
+`metadata` dict plus top-level `text`/`source`. The CVE discriminator value
+also disagreed outright: the ingest script's collection was named `cve`,
+`tools/qdrant.py` filters for `cve_intel`. Running
+`python scripts/ingest_qdrant.py all` as documented in `CLAUDE.md` against a
+fresh Qdrant instance would have populated data neither
+`qdrant_retrieve_mitre` nor `qdrant_retrieve` could ever read back — a silent
+Tier 0 blocker, since both tools would just return `[]` with no error.
+
+**Fixed**, per explicit user instruction to make `ingest_qdrant.py` match
+`tools/qdrant.py` (not the other way — the live deployment already matches
+`tools/qdrant.py`'s shape):
+- One shared collection (`QDRANT_COLLECTION`, imported from `config.py`, not
+  hardcoded) instead of three. `_ensure_shared_collection()` creates it only
+  if missing — critically, it never deletes an existing collection, since
+  all three kb types now live in the same one and the old delete-and-recreate
+  behavior would have wiped the other two types' data on every single-type
+  ingest run. Added `_clear_kb_type()` instead: deletes only the points
+  matching one discriminator value (via a `FilterSelector`/`Filter` on the
+  `collection` payload field) before that type's points are re-upserted, so
+  re-running e.g. `mitre` alone is safe and idempotent without touching
+  `cve_intel`/`playbooks` data.
+- Embedding switched from `fastembed`/`BAAI/bge-small-en` (384-dim) to
+  `sentence-transformers`/`QDRANT_EMBEDDING_MODEL` (from `config.py`, default
+  `BAAI/bge-m3`, 1024-dim) — same lazy-singleton loading pattern
+  `tools/qdrant.py` already uses. `EMBED_DIM` constant updated to 1024
+  accordingly.
+- CVE discriminator unified to `cve_intel` everywhere (matching
+  `tools/qdrant.py`, not the ingest script's old `cve`).
+- Payload shape rewritten field-for-field against what each of
+  `retrieve_mitre`/`retrieve_cve`/`retrieve_playbooks` actually reads:
+  top-level `text` (the full/display content string), `source` (a stable
+  identifier, used as the fallback for `technique_id`/`cve_id`), `collection`
+  (the discriminator), and a nested `metadata` dict holding the
+  per-type structured fields (`technique_id`/`name`/`tactics`/
+  `is_subtechnique`/`parent_technique` for MITRE; `cve_id`/`vendor_project`/
+  `product`/`cvss_score` for CVE; `title`/`mitre_techniques` for playbooks).
+  The old script wrote a flat payload with none of this nesting — none of
+  the three `retrieve_*()` functions could have found their fields even once
+  the collection/dimension/model were fixed, if the payload shape hadn't
+  been fixed too.
+- Point IDs now include the discriminator in their stable-hash input
+  (`sha256(f"{kb_collection}:{key}")`) since all three types now share one ID
+  space in one collection.
+- `fastembed` removed from `requirements.txt` — genuinely unused now
+  (previously listed as "unused" in this log's own known-issues section,
+  which was actually incorrect at the time — `ingest_qdrant.py` was still
+  using it; it's accurate now).
+- CVE's `vendor_project`/`product` split: the pre-existing NVD `cpeMatch`
+  parsing logic (which extracts `parts[4]` from a CPE 2.3 criteria string
+  under a same-pre-existing `"enterprise_sw" in criteria or "application" in
+  criteria` condition) was left untouched — not part of this task's scope —
+  the combined string is stored in `vendor_project`, `product` left empty
+  rather than guessed at.
+
+**Not touched:** whether the live `triage_kb` collection's *existing* points
+(if any were written before this fix, by whatever process actually populated
+it — still unclear from code inspection, see `REPO-STATUS.md` §9) match this
+corrected payload shape. That needs a live check before trusting
+`qdrant_retrieve_mitre`/`qdrant_retrieve` results in a Tier 0 test; if they
+don't match, a fresh `python scripts/ingest_qdrant.py all` run will now
+correctly populate/replace them.
+
+`pytest tests/ -v`: **154/154 passing**, unchanged (this module has no
+dedicated test file — a known, unaddressed coverage gap, see
+`REPO-STATUS.md` §9). Verified separately: `ast.parse()` syntax check across
+every `.py` file in the repo, and a live import of
+`scripts/ingest_qdrant.py` (confirms `FilterSelector`/`Filter`/
+`FieldCondition`/`MatchValue` all resolve against the installed
+`qdrant-client` package, and that `QDRANT_COLLECTION`/`QDRANT_EMBEDDING_MODEL`
+correctly come from `config.py` rather than being hardcoded again).
+
+`REPO-STATUS.md` updated in the same commit to mark this finding resolved
+rather than open.

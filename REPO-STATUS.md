@@ -260,7 +260,7 @@ status (honest, not aspirational):
 | `get_fp_signal` (A1) | `tools/fp_tracking.py` | Local SQLite (`FP_DB_PATH`, default `./data/fp_events.db`) | none (local file) | Fully unit-tested (`tests/test_fp_tracking.py`, 9 tests: schema creation, window correctness, per-rule/host scoping). No live/production data exists in this worktree — `data/` directory doesn't exist on disk here yet. |
 | `thehive_fp_history` (A1) | `tools/fp_tracking.py` → `tools/thehive.py::search_fp_history` | TheHive `/v1/query` | Bearer token (`THEHIVE_API_KEY`) | Conditional-gating logic unit-tested; the underlying TheHive query shape (`search_fp_history`) is built on the same **unverified** query convention as `search_open_cases`/`search_closed_cases` below — not confirmed against a live 5.6.1 instance. |
 | `detection_rule_lookup` (A1) | `tools/detection_rules.py::get_rule_source` | Elasticsearch `so-detection` index | reuses `tools/elasticsearch.py`'s API-key header | Rewritten this session to query ES directly. Schema/coverage numbers (Sigma 86.5%, Suricata ~50%, YARA 0%) are stated in the code's comments and `SOC-3s-ARCHITECTURE-v3-final.md` §7 as confirmed against the live index, but this read-through did not independently re-verify them (no live ES access from this pass) — 10 unit tests with mocked ES responses pass. |
-| `qdrant_retrieve_mitre` (A1) | `tools/qdrant.py::retrieve_mitre` | Qdrant, collection `QDRANT_COLLECTION` (default `triage_kb`), payload-filtered on `collection=mitre_attack` | none configured | Unit-tested with mocked client/embedder. **Not confirmed the live `triage_kb` collection is actually populated with this schema** — see §9's ingestion-script mismatch finding. |
+| `qdrant_retrieve_mitre` (A1) | `tools/qdrant.py::retrieve_mitre` | Qdrant, collection `QDRANT_COLLECTION` (default `triage_kb`), payload-filtered on `collection=mitre_attack` | none configured | Unit-tested with mocked client/embedder. `scripts/ingest_qdrant.py` now writes a matching schema (§9) — but whatever previously populated the live `triage_kb` collection predates that fix, so it's still worth confirming the live points match before trusting results in a live test. |
 | `thehive_open_cases` (A1) | `tools/thehive.py::search_open_cases` | TheHive `/v1/query` | Bearer token | Query shape (`observable`/`host`/`user` `should` clauses, `status in [Open, InProgress]` filter) is **not directly unit-tested** and not confirmed against the live instance — flagged as unverified in the code's own comments. |
 | `get_case_full` (A1) | `tools/thehive.py::get_case_full` | TheHive `/v1/case/{id}` | Bearer token | Directly unit-tested (`tests/test_thehive.py`). |
 | `thehive_search_closed` (A2) | `tools/thehive.py::search_closed_cases` | TheHive `/v1/query` | Bearer token | **Not directly unit-tested.** Only exercised indirectly through `test_investigate.py`'s mocked-agent tests. Query shape unverified against live TheHive. |
@@ -342,9 +342,9 @@ transitively.
   `fastembed`+`BAAI/bge-small-en`; the live `triage_kb` collection's vectors
   are 1024-dim (`BAAI/bge-m3`), which no `fastembed`-supported model
   produces, so `tools/qdrant.py`'s query path uses raw `sentence-transformers`
-  instead. Note: `fastembed` is *still actually used* by
-  `scripts/ingest_qdrant.py` — see §9 for why this is now a live
-  inconsistency, not a resolved one.
+  instead. `scripts/ingest_qdrant.py` still used `fastembed` until this
+  session's follow-up fix (§9) brought it in line with `tools/qdrant.py`;
+  `fastembed` has now been removed from `requirements.txt` entirely.
 - **Filesystem-based detection rule lookup** — Phase B's `detection_rules.py`
   read Sigma YAML from `SIGMA_RULES_PATH` and scanned Suricata's `all.rules`
   file directly. Superseded this session: the filesystem Sigma path
@@ -413,30 +413,34 @@ tests.
 
 **Newly found in this read-through, not previously flagged in `CHANGES.md`:**
 
-1. **`scripts/ingest_qdrant.py` and `tools/qdrant.py` are structurally
-   incompatible as currently written.** `ingest_qdrant.py` creates **three
-   separate named Qdrant collections** (`mitre_attack`, `cve`, `playbooks`),
-   each with **384-dimension** vectors produced by `fastembed`'s
-   `BAAI/bge-small-en`. `tools/qdrant.py` (the actual runtime query path used
-   by both agents) queries a **single collection** (`QDRANT_COLLECTION`,
-   default `triage_kb`) with **1024-dimension** vectors produced by
-   `sentence-transformers`' `BAAI/bge-m3`, filtered by a payload field
-   `collection` whose values are `mitre_attack`, `cve_intel` (not `cve`),
-   and `playbooks`. Running `python scripts/ingest_qdrant.py all` as
-   documented in `CLAUDE.md`'s Commands section, against a fresh Qdrant
-   instance, would **not** populate anything `tools/qdrant.py` can read —
-   wrong collection name(s), wrong vector dimension, wrong embedding model,
-   and (for CVE) a mismatched discriminator value. `CHANGES.md` (line 311)
-   claims `fastembed` is listed in `requirements.txt` but "unused" — that is
-   incorrect; `fastembed` **is** used, by `ingest_qdrant.py`, just not by the
-   runtime query path. Whatever populated the live `triage_kb` collection
+1. ~~**`scripts/ingest_qdrant.py` and `tools/qdrant.py` are structurally
+   incompatible as currently written.**~~ **Fixed** (post-Phase-F, same
+   session as this document). `ingest_qdrant.py` used to create three
+   separate named Qdrant collections (`mitre_attack`, `cve`, `playbooks`),
+   each with 384-dimension vectors from `fastembed`'s `BAAI/bge-small-en`,
+   with a flat (non-`metadata`-nested) payload shape — while `tools/qdrant.py`
+   (the actual runtime query path) queries a single collection
+   (`QDRANT_COLLECTION`, default `triage_kb`) with 1024-dimension vectors
+   from `sentence-transformers`' `BAAI/bge-m3`, filtered by a `collection`
+   payload field, reading structured fields from a nested `metadata` dict
+   plus top-level `text`/`source`. Rewritten to match `tools/qdrant.py`
+   exactly: one shared collection, `BAAI/bge-m3` via `sentence-transformers`,
+   1024-dim, `collection` discriminator values `mitre_attack`/`cve_intel`
+   (not `cve` — that mismatch is also fixed)/`playbooks`, and payload shape
+   (`text`/`source`/`collection`/`metadata.*`) verified field-for-field
+   against what each of `retrieve_mitre`/`retrieve_cve`/`retrieve_playbooks`
+   reads back. Because the three types now share one physical collection,
+   each `ingest_*()` function first ensures the collection exists (creating
+   it only if missing — never deleting it, so ingesting one type doesn't wipe
+   the other two) and then deletes only its own discriminator's existing
+   points before re-upserting, so re-running e.g. `mitre` alone is safe.
+   `fastembed` removed from `requirements.txt` — no longer used anywhere in
+   the repo. Whatever previously populated the live `triage_kb` collection
    (referenced as "already deployed and working" in the architecture doc's
    rejected-alternatives table) evidently did not go through this script as
-   it exists today — unclear from code inspection how it actually got
-   populated. **This should be resolved before relying on
-   `qdrant_retrieve_mitre`/`qdrant_retrieve` in a live Tier 0 test**, since
-   right now the ingestion script and the query code cannot talk to the same
-   data.
+   it existed before this fix — unclear from code inspection how it actually
+   got populated; worth confirming the live collection's payload shape
+   matches what's now written here before the first live re-ingest.
 2. **`schemas.py`'s `TriageState` TypedDict comment is stale.** It documents
    `raw_alert`/`asset_context`/`thehive_alert_id` as "Webhook path input...
    consumed by `perceive()`", but `nodes/perceive.py` never reads any of
@@ -498,10 +502,12 @@ any tier where the system acts autonomously.
    (agent-service now fetches that itself). Nothing here has been applied to
    a live n8n instance — this is still a documentation-only deliverable as
    of this state.
-2. **Fix the Qdrant ingestion/query mismatch** (§9, item 1) — otherwise
-   `qdrant_retrieve_mitre` and `qdrant_retrieve` will silently return `[]`
-   against a freshly-ingested collection, or continue relying on whatever
-   populated the live `triage_kb` collection outside this script.
+2. ~~Fix the Qdrant ingestion/query mismatch~~ **Fixed** (§9, item 1) —
+   `scripts/ingest_qdrant.py` now writes the same collection, dimension,
+   embedding model, and payload shape `tools/qdrant.py` reads. Still worth a
+   one-time check that the live `triage_kb` collection's existing points (if
+   any predate this fix) actually match this payload shape before trusting
+   `qdrant_retrieve_mitre`/`qdrant_retrieve` results in a live test.
 3. **Confirm the ES firewall hostgroup** includes the agent-service host —
    `elasticsearch_query` and `detection_rule_lookup` both depend on reaching
    Elasticsearch directly.
@@ -555,11 +561,11 @@ branches before broadening to real traffic volume.
 │   ├── analyst.py               Agent 3's system prompt, output JSON schemas, GBNF grammar (defined but unused by analyze.py)
 │   ├── investigator.py          Agent 2's system prompt — tool docs, per-profile investigation focus, Cortex discipline
 │   └── perceiver.py             Agent 1's system prompt — all 6 PERCEPTION_TOOLS documented, explicit tool call order, FP guardrail
-├── requirements.txt             Python dependencies (includes fastembed, used only by scripts/ingest_qdrant.py — see §9)
+├── requirements.txt             Python dependencies (fastembed removed — no longer used anywhere, see §9)
 ├── schemas.py                   All Pydantic models + the LangGraph TriageState TypedDict, single file
 ├── scripts/
 │   ├── __init__.py              Empty
-│   └── ingest_qdrant.py         Standalone CLI to populate Qdrant — currently mismatched with tools/qdrant.py's schema, see §9
+│   └── ingest_qdrant.py         Standalone CLI to populate Qdrant's shared triage_kb collection — schema fixed to match tools/qdrant.py, see §9
 ├── SOC-3s-ARCHITECTURE-v3-final.md  Design/architecture reference — current, but with drift noted in §9 above
 ├── test.sh                      Local static-check runner: syntax check, install deps, pytest, import/route-registration check
 ├── tests/
