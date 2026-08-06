@@ -415,3 +415,133 @@ def test_build_canonical_alert_timestamp_prefers_at_timestamp_over_date():
     }
     alert = build_canonical_alert(raw, None, {})
     assert alert.timestamp.year == 2026 and alert.timestamp.month == 1 and alert.timestamp.day == 15
+
+
+# --- Additional confirmed Sigma event_data shapes (winlog / powershell / ssh /
+# login_flow) — field paths are hand-built strictly from reference.txt, a live
+# Elasticsearch _mapping dump for logs-detections.alerts-so merged across 24
+# rollover backing indices (~4 weeks of real production Sigma alerts), NOT from
+# assumptions. Every field below is a confirmed mapped path from that dump.
+
+
+def test_build_canonical_alert_winlog_native_event_shape():
+    raw = {
+        "rule": {"name": "Suspicious Driver Load", "uuid": "aaaaaaaa-1111-2222-3333-444444444444"},
+        "event": {"module": "sigma", "severity": 3},
+        "event_data": {
+            "winlog": {
+                "computer_name": "dc01.corp.local",
+                "event_id": "6",
+                "process": {"pid": 640},
+                "user": {"name": "SYSTEM", "domain": "NT AUTHORITY", "identifier": "S-1-5-18"},
+            },
+        },
+    }
+    alert = build_canonical_alert(raw, None, {})
+
+    assert alert.host.hostname == "dc01.corp.local"
+    assert alert.user.name == "SYSTEM"
+    assert alert.user.id == "S-1-5-18"
+    assert alert.process.pid == 640
+    # no Image/CommandLine confirmed for this shape — must stay unset, not guessed
+    assert alert.process.command_line is None
+    assert alert.process.name is None
+
+
+def test_build_canonical_alert_winlog_process_missing_pid_stays_none():
+    raw = {
+        "rule": {"name": "x", "uuid": "y"},
+        "event_data": {"winlog": {"computer_name": "host1"}},
+    }
+    alert = build_canonical_alert(raw, None, {})
+    assert alert.host.hostname == "host1"
+    assert alert.process is None
+
+
+def test_build_canonical_alert_powershell_engine_lifecycle_shape():
+    raw = {
+        "rule": {"name": "PowerShell Engine State Changed", "uuid": "bbbbbbbb-1111-2222-3333-444444444444"},
+        "event_data": {
+            "winlog": {"computer_name": "workstation-12", "user": {"name": "jdoe"}},
+            "powershell": {
+                "engine": {"new_state": "Available", "previous_state": "None", "version": "5.1"},
+                "process": {"executable_version": "5.1.19041.1"},
+                "runspace_id": "3f9c1a2b-...",
+            },
+        },
+    }
+    alert = build_canonical_alert(raw, None, {})
+
+    assert alert.host.hostname == "workstation-12"
+    assert alert.user.name == "jdoe"
+    assert "powershell engine None -> Available" in alert.process.command_line
+    assert "5.1.19041.1" in alert.process.command_line
+
+
+def test_build_canonical_alert_powershell_no_engine_state_falls_through():
+    raw = {"rule": {"name": "x", "uuid": "y"}, "event_data": {"powershell": {"runspace_id": "abc"}}}
+    alert = build_canonical_alert(raw, None, {})
+    assert alert.process is None
+
+
+def test_build_canonical_alert_ssh_auth_log_shape():
+    raw = {
+        "rule": {"name": "Multiple SSH Auth Failures", "uuid": "cccccccc-1111-2222-3333-444444444444"},
+        "event_data": {
+            "host": {"name": "bastion01"},
+            "user": {"name": "root"},
+            "source": {"ip": "198.51.100.23", "port": 51234},
+            "system": {"auth": {"ssh": {"event": "Failed", "method": "password"}}},
+        },
+    }
+    alert = build_canonical_alert(raw, None, {})
+
+    assert alert.host.hostname == "bastion01"
+    assert alert.user.name == "root"
+    assert alert.process.command_line == "ssh Failed (password)"
+    assert alert.network.src_ip == "198.51.100.23"
+    assert alert.network.src_port == 51234
+
+
+def test_build_canonical_alert_ssh_auth_no_event_falls_through():
+    raw = {"rule": {"name": "x", "uuid": "y"}, "event_data": {"system": {"auth": {"ssh": {}}}}}
+    alert = build_canonical_alert(raw, None, {})
+    assert alert.process is None
+
+
+def test_build_canonical_alert_http_login_flow_shape():
+    raw = {
+        "rule": {"name": "Suspicious Login Flow Activity", "uuid": "dddddddd-1111-2222-3333-444444444444"},
+        "event_data": {
+            "http": {
+                "method": "POST",
+                "uri": "/self-service/login/flows?flow=abc123",
+                "useragent": "curl/8.0.1",
+                "request": {"remote": "203.0.113.77:443", "host": "auth.corp.local"},
+            },
+            "login_flow": {"type": "browser", "state": "choose_method", "active": "password"},
+        },
+    }
+    alert = build_canonical_alert(raw, None, {})
+
+    assert "POST /self-service/login/flows?flow=abc123" in alert.process.command_line
+    assert "login_flow type=browser state=choose_method" in alert.process.command_line
+    assert alert.network.src_ip == "203.0.113.77"
+    assert alert.network.src_port == 443
+
+
+def test_build_canonical_alert_http_login_flow_no_method_or_uri_falls_through():
+    raw = {"rule": {"name": "x", "uuid": "y"}, "event_data": {"login_flow": {"type": "browser"}}}
+    alert = build_canonical_alert(raw, None, {})
+    assert alert.process is None
+
+
+def test_split_host_port_ipv6_style_value_not_mangled():
+    # count(":") != 1 for anything IPv6-shaped or already-bare — must pass through unmodified.
+    raw = {
+        "rule": {"name": "x", "uuid": "y"},
+        "event_data": {"http": {"method": "GET", "uri": "/x", "request": {"remote": "203.0.113.5"}}},
+    }
+    alert = build_canonical_alert(raw, None, {})
+    assert alert.network.src_ip == "203.0.113.5"
+    assert alert.network.src_port is None

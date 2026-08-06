@@ -1498,13 +1498,82 @@ fixing.
 outside this repo, and the document had drifted from how the integration
 actually works (see above).
 
-**Not done, left as an open decision for the project owner:** extending
-`_extract_process_from_event_data`/`_extract_host_from_event_data`/
-`_extract_user_from_event_data` to handle the `winlog`/`powershell`/`ssh`/
-`login_flow` `event_data` shapes surfaced by `reference.txt` (see above).
-
 `pytest tests/ -v`: **160/160 passing** (was 154; +6 net new tests covering
 the real raw-SO-doc shape end to end, the `ioc.source_engine`/`event.module`
 fallback, the `event.severity` fallback, the `@timestamp`-vs-`date`
 precedence, the top-level-vs-nested YARA hash location, and confirming
 `raw_alert.observables` is now correctly ignored).
+
+## Post-Phase-F — `alert_builder.py`: extraction added for the 4 remaining `event_data` shapes
+
+The previous entry above left `winlog`/`powershell`/`ssh`/`login_flow`
+unhandled (graceful no-op — every extractor already degraded to `None`
+rather than raising). The project owner flagged this as a real gap to close,
+not an acceptable scope boundary: real Sigma rules in this deployment do
+match against these shapes, so they need to actually extract, not just fail
+safely. Five new presence-guarded extractors added, all field paths taken
+strictly from `reference.txt`'s confirmed mapping (not assumptions):
+
+1. `_extract_winlog_host` / `_extract_winlog_user` / `_extract_winlog_process`
+   — native Windows Event Log channel, distinct from the Elastic-Defend/
+   Sysmon-via-elastic-agent shape already handled. Confirmed fields:
+   `event_data.winlog.computer_name`, `event_data.winlog.user.{name,
+   identifier}`, `event_data.winlog.process.pid`. The mapping does not show
+   an Image/CommandLine/Name equivalent under this shape, so `Process.name`/
+   `.path`/`.command_line` are deliberately left unset rather than guessed —
+   only `pid` is populated.
+2. `_extract_powershell_from_event_data` — PowerShell engine-lifecycle
+   events (Microsoft-Windows-PowerShell/Operational channel). Confirmed
+   fields: `event_data.powershell.engine.{new_state,previous_state}`,
+   `event_data.powershell.process.executable_version`. No process exists for
+   this event type (it's an engine state transition, not a spawned process),
+   so the result is synthesized into `Process.command_line` as a short
+   description (e.g. `"powershell engine None -> Available (v5.1.19041.1)"`)
+   — explicitly not a literal shell invocation.
+3. `_extract_ssh_auth_from_event_data` — SSH auth log lines (Filebeat
+   system/auth module). Confirmed fields: `event_data.system.auth.ssh.
+   {event,method}`. Same synthesized-`command_line` approach as above (e.g.
+   `"ssh Failed (password)"`) — there's no typed CanonicalAlert field for an
+   auth outcome, and host/user for this shape already come through the
+   existing generic `event_data.host`/`event_data.user` extractors
+   unchanged, since those are shared ECS fields, not Sysmon-specific.
+4. `_extract_http_login_flow_from_event_data` — Kratos/identity-provider
+   auth-flow logging (HTTP-request-driven Sigma match, no host telemetry).
+   Confirmed fields: `event_data.http.{method,uri}`,
+   `event_data.login_flow.{type,state}`. Same synthesized-`command_line`
+   approach (e.g. `"POST /self-service/login/flows?flow=abc123 [login_flow
+   type=browser state=choose_method]"`).
+5. `_extract_network_from_event_data` (+ `_split_host_port` helper) — new
+   fallback for network context nested under `event_data` rather than
+   `raw_alert`'s top level, used by the SSH/HTTP shapes above. Confirmed
+   fields: `event_data.source.{ip,address,port}` and
+   `event_data.http.request.remote` (a `"host[:port]"` string per the
+   mapping — port split off defensively, left whole if the split doesn't
+   look like `host:digits`).
+
+All five are wired into `build_canonical_alert`'s existing fallback chains
+(host/user/process/network), tried after the richer, already-confirmed
+Elastic-Defend/Sysmon path and before the last-resort description-regex
+fallback — so a real process-creation Sigma alert still gets its full,
+richer extraction untouched; these only fire when that structured process
+data genuinely isn't there.
+
+**Explicitly not done:** the PE-version-resource-looking fields under
+`event_data.winlog.event_data.*` (`Company`, `Description`, `FileVersion`,
+`Product`, `TerminalSessionId`, `LogonGuid`, `LogonId`, `ParentUser`,
+`IntegrityLevel`) — these are confirmed present in the field mapping but
+there's no confirmed evidence of which specific winlog event type produces
+them (a driver-load event, a native process-creation audit event, or
+something else), and `Process`/`File` have no matching fields to hold them
+even if their meaning were confirmed. Left unmapped rather than guessed at,
+consistent with the "do not invent or assume" instruction this whole
+investigation was run under.
+
+Test fixtures for all 9 new tests are hand-built strictly from
+`reference.txt`'s confirmed field paths (no real alert samples exist yet for
+these 4 shapes) — each fixture uses only mapped field names, and each has a
+matching "fields absent, falls through to None" negative test.
+
+`pytest tests/ -v`: **169/169 passing** (was 160; +9 new tests, one per new
+extractor plus the negative/fall-through cases and the `_split_host_port`
+edge case).

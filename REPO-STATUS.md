@@ -78,9 +78,11 @@ run tests):**
 - A post-approval case-action module (`nodes/case_action.py`) exists but is
   **not wired into the graph** — see §9.
 
-**Tested:** `pytest tests/ -v` → **160 passed, 0 failed** (verified by running
-it directly; 6 net new tests added when `alert_builder.py` was corrected to
-match the real raw-SO-payload contract, see `CHANGES.md`). Coverage
+**Tested:** `pytest tests/ -v` → **169 passed, 0 failed** (verified by running
+it directly; 15 net new tests added when `alert_builder.py` was corrected to
+match the real raw-SO-payload contract and extended to cover 4 additional
+`event_data` shapes (winlog/PowerShell/SSH/login_flow), see `CHANGES.md`).
+Coverage
 spans schemas, alert_builder, all 5 graph nodes, graph routing, all prompt
 builders, detection_rules, fp_tracking, qdrant, and two full end-to-end
 `/triage` round trips (`test_e2e.py`) with every external call mocked
@@ -485,7 +487,7 @@ any tier where the system acts autonomously.
 
 **Done:**
 - Full pipeline code path exists and is unit/integration-tested against
-  mocks (160/160 passing).
+  mocks (169/169 passing).
 - All read-only tool integrations are implemented.
 - Detection-rule lookup now sources from the correct live data (ES
   `so-detection`), fixing what would otherwise have been a silent MITRE-mapping
@@ -579,7 +581,7 @@ branches before broadening to real traffic volume.
 ├── tests/
 │   ├── __init__.py               Empty
 │   ├── conftest.py               Autouse fixture isolating every test's FP_DB_PATH to a tmp_path
-│   ├── test_alert_builder.py     17 tests — per-engine structured extraction, regex fallback, real-raw-SO-doc shape, ioc.*/event.severity/@timestamp fallbacks, observables sourced from hive_alert not raw_alert
+│   ├── test_alert_builder.py     25 tests — per-engine structured extraction, regex fallback, real-raw-SO-doc shape, ioc.*/event.severity/@timestamp fallbacks, observables sourced from hive_alert not raw_alert, winlog/PowerShell/SSH/login_flow event_data shapes
 │   ├── test_analyze.py           11 tests — JSON extraction, evidence summarization, Agent-3-not-Agent-1 mapping assertion
 │   ├── test_case_action.py       11 tests — all 4 case actions, approval gate, error paths
 │   ├── test_detection_rules.py   10 tests — ES-mocked, all Sigma tag namespaces, Suricata with/without MITRE, YARA, errors

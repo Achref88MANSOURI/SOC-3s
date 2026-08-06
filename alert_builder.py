@@ -225,6 +225,142 @@ def _extract_process_from_event_data(event_data: dict) -> tuple[Process | None, 
     return process, hashes
 
 
+def _extract_winlog_host(event_data: dict) -> Host | None:
+    """Native Windows Event Log (winlog) channel — a distinct telemetry shape
+    from the Elastic-Defend/Sysmon-via-elastic-agent one _extract_host_from_event_data
+    handles. Confirmed field (live logs-detections.alerts-so field mapping,
+    reference.txt): event_data.winlog.computer_name. Sigma rules matching
+    native winlog channels (as opposed to Sysmon-derived process events) carry
+    this instead of event_data.host.*."""
+    winlog = _as_dict(event_data.get("winlog"))
+    computer_name = winlog.get("computer_name")
+    if not computer_name:
+        return None
+    return Host(hostname=computer_name)
+
+
+def _extract_winlog_user(event_data: dict) -> User | None:
+    """Confirmed fields: event_data.winlog.user.{name,identifier} (identifier
+    is a Windows SID, mapped to User.id the same way _extract_user_from_event_data
+    maps event_data.user.id)."""
+    winlog = _as_dict(event_data.get("winlog"))
+    user_data = _as_dict(winlog.get("user"))
+    name = user_data.get("name")
+    if not name:
+        return None
+    identifier = user_data.get("identifier")
+    return User(name=name, id=str(identifier) if identifier is not None else None)
+
+
+def _extract_winlog_process(event_data: dict) -> Process | None:
+    """Confirmed field: event_data.winlog.process.pid only. The live field
+    mapping this was verified against (reference.txt) does not show an
+    Image/CommandLine/Name equivalent under this shape — event_data.winlog.
+    event_data.{Company,Description,FileVersion,Product,...} look like
+    PE-version-resource metadata (the same kind of fields Sysmon's own
+    event_data.process.pe.* carries) but Process has no field for them and
+    there isn't enough confirmed structure here to say which specific winlog
+    event type produces this shape, so they're deliberately left unmapped
+    rather than guessed at."""
+    winlog = _as_dict(event_data.get("winlog"))
+    process_data = _as_dict(winlog.get("process"))
+    pid = process_data.get("pid")
+    if pid is None:
+        return None
+    return Process(pid=pid)
+
+
+def _extract_powershell_from_event_data(event_data: dict) -> Process | None:
+    """PowerShell engine-lifecycle logging (Microsoft-Windows-PowerShell/
+    Operational channel — a winlog sub-shape, but with its own dedicated
+    event_data.powershell.* namespace). Confirmed fields: event_data.
+    powershell.engine.{new_state,previous_state,version},
+    event_data.powershell.process.executable_version,
+    event_data.powershell.runspace_id. No pid/command_line/name exist for
+    this shape — it's an engine state-change event, not a spawned process —
+    synthesized into command_line the same way as SSH/HTTP below."""
+    powershell = _as_dict(event_data.get("powershell"))
+    engine = _as_dict(powershell.get("engine"))
+    new_state = engine.get("new_state")
+    previous_state = engine.get("previous_state")
+    if not (new_state or previous_state):
+        return None
+    summary = f"powershell engine {previous_state or '?'} -> {new_state or '?'}"
+    version = _as_dict(powershell.get("process")).get("executable_version")
+    if version:
+        summary += f" (v{version})"
+    return Process(command_line=summary)
+
+
+def _extract_ssh_auth_from_event_data(event_data: dict) -> Process | None:
+    """SSH auth log lines (Filebeat system/auth module) carry no process
+    telemetry at all — confirmed fields: event_data.system.auth.ssh.{event,
+    method} (e.g. event="Accepted", method="publickey"). There is no typed
+    CanonicalAlert field for an authentication outcome, so this is synthesized
+    into command_line as a short textual description — the same "best
+    available descriptive text, not necessarily a literal shell invocation"
+    precedent _parse_process's description-regex fallback already uses."""
+    ssh = _as_dict(_as_dict(_as_dict(event_data.get("system")).get("auth")).get("ssh"))
+    event = ssh.get("event")
+    if not event:
+        return None
+    method = ssh.get("method")
+    summary = f"ssh {event}" + (f" ({method})" if method else "")
+    return Process(command_line=summary)
+
+
+def _extract_http_login_flow_from_event_data(event_data: dict) -> Process | None:
+    """Kratos/identity-provider auth-flow logging (an HTTP-request-driven
+    Sigma match, not host telemetry) — confirmed fields: event_data.http.
+    {method,uri,useragent}, event_data.login_flow.{type,state}. Same
+    synthesized-command_line approach as _extract_ssh_auth_from_event_data,
+    for the same reason: no process exists here, but the request
+    method/uri/login-flow state is the actual rule-relevant content."""
+    http = _as_dict(event_data.get("http"))
+    login_flow = _as_dict(event_data.get("login_flow"))
+    method = http.get("method")
+    uri = http.get("uri")
+    if not (method or uri):
+        return None
+    summary = " ".join(p for p in (method, uri) if p)
+    flow_type = login_flow.get("type")
+    flow_state = login_flow.get("state")
+    if flow_type or flow_state:
+        summary += f" [login_flow type={flow_type or '?'} state={flow_state or '?'}]"
+    return Process(command_line=summary)
+
+
+def _split_host_port(value: str) -> tuple[str, int | None]:
+    if value.count(":") == 1:
+        host, _, port = value.partition(":")
+        if port.isdigit():
+            return host, int(port)
+    return value, None
+
+
+def _extract_network_from_event_data(event_data: dict) -> Network | None:
+    """Network context nested under event_data rather than raw_alert's top
+    level — used by _extract_network_from_raw_alert's callers as a fallback
+    for the auth-log/HTTP shapes above, which carry a connecting source
+    address but no Suricata-style top-level source/destination. Confirmed
+    fields: event_data.source.{ip,address,port} (SSH auth logs) and
+    event_data.http.request.remote (Kratos/HTTP request source — a
+    "host[:port]" string per the field mapping, port split off defensively
+    since the mapping only confirms it as an opaque keyword string)."""
+    source = _as_dict(event_data.get("source"))
+    src_ip = source.get("ip") or source.get("address")
+    src_port = source.get("port")
+    if not src_ip:
+        http = _as_dict(event_data.get("http"))
+        request = _as_dict(http.get("request"))
+        remote = request.get("remote")
+        if remote:
+            src_ip, src_port = _split_host_port(remote)
+    if not src_ip:
+        return None
+    return Network(src_ip=src_ip, src_port=src_port)
+
+
 def _merge_hashes(target: HashBundle, extra: HashBundle) -> None:
     for field in ("md5", "sha1", "sha256", "sha512", "imphash"):
         existing = getattr(target, field)
@@ -453,9 +589,18 @@ def build_canonical_alert(
 
     Per-engine structured extraction, all confirmed from live captured payloads
     and Security Onion's own ingest pipeline source (so-ingest-reference/):
-    - Sigma: raw_alert["event_data"] carries the matched source event — see
-      _extract_process_from_event_data / _extract_host_from_event_data /
-      _extract_user_from_event_data.
+    - Sigma: raw_alert["event_data"] carries the matched source event, in one
+      of (at least) five confirmed shapes depending on which underlying log
+      source the rule matched — checked in this order: Elastic-Defend/Sysmon
+      process events (_extract_process_from_event_data /
+      _extract_host_from_event_data / _extract_user_from_event_data), native
+      Windows Event Log winlog events (_extract_winlog_*), PowerShell
+      engine-lifecycle events (_extract_powershell_from_event_data), SSH auth
+      log lines (_extract_ssh_auth_from_event_data), and Kratos/HTTP
+      login-flow events (_extract_http_login_flow_from_event_data) — the
+      latter three have no process telemetry at all, so their result is a
+      short synthesized command_line description, not a literal shell
+      invocation.
     - Suricata: no event_data; network context (source/destination ip/port,
       transport) lives at the top level of raw_alert — see
       _extract_network_from_raw_alert. No process/user/hash fields exist.
@@ -480,12 +625,24 @@ def build_canonical_alert(
     observables = _build_observables(hive_alert)
     _merge_observables(observables, _extract_ioc_indicators(raw_alert))
 
-    host = _extract_host_from_event_data(event_data) or _parse_host(raw_alert, description)
-    user = _extract_user_from_event_data(event_data)
+    host = (
+        _extract_host_from_event_data(event_data)
+        or _extract_winlog_host(event_data)
+        or _parse_host(raw_alert, description)
+    )
+    user = _extract_user_from_event_data(event_data) or _extract_winlog_user(event_data)
     process, event_data_hashes = _extract_process_from_event_data(event_data)
     if process is None:
+        process = _extract_winlog_process(event_data)
+    if process is None:
+        process = _extract_powershell_from_event_data(event_data)
+    if process is None:
+        process = _extract_ssh_auth_from_event_data(event_data)
+    if process is None:
+        process = _extract_http_login_flow_from_event_data(event_data)
+    if process is None:
         process = _parse_process(description)
-    network = _extract_network_from_raw_alert(raw_alert)
+    network = _extract_network_from_raw_alert(raw_alert) or _extract_network_from_event_data(event_data)
     file_, file_hashes = _extract_file_from_raw_alert(raw_alert)
 
     _merge_hashes(observables.hashes, event_data_hashes)
