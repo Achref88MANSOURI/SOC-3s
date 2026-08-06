@@ -48,10 +48,12 @@ class Settings:
     llm_api_key: str = field(default_factory=lambda: os.environ.get("LLM_API_KEY", ""))
 
     qdrant_url: str = field(default_factory=lambda: os.environ.get("QDRANT_URL", "http://localhost:6333"))
+    qdrant_collection: str = field(default_factory=lambda: os.environ.get("QDRANT_COLLECTION", "triage_kb"))
+    qdrant_embedding_model: str = field(default_factory=lambda: os.environ.get("QDRANT_EMBEDDING_MODEL", "BAAI/bge-m3"))
 
     redis_url: str | None = field(default_factory=lambda: os.environ.get("REDIS_URL") or None)
 
-    sigma_rules_path: str = field(default_factory=lambda: os.environ.get("SIGMA_RULES_PATH", "/opt/so/rules/sigma"))
+    fp_db_path: str = field(default_factory=lambda: os.environ.get("FP_DB_PATH", "./data/fp_events.db"))
 
     max_tool_calls_new: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_NEW", "8")))
     max_tool_calls_merge: int = field(default_factory=lambda: int(os.environ.get("MAX_TOOL_CALLS_MERGE", "5")))
@@ -79,10 +81,12 @@ LLM_MODEL: str = settings.llm_model
 LLM_API_KEY: str = settings.llm_api_key
 
 QDRANT_URL: str = settings.qdrant_url
+QDRANT_COLLECTION: str = settings.qdrant_collection
+QDRANT_EMBEDDING_MODEL: str = settings.qdrant_embedding_model
 
 REDIS_URL: str | None = settings.redis_url
 
-SIGMA_RULES_PATH: str = settings.sigma_rules_path
+FP_DB_PATH: str = settings.fp_db_path
 
 AGENT1_MAX_ITERATIONS_NEW: int = settings.max_tool_calls_new
 AGENT1_MAX_ITERATIONS_MERGE: int = settings.max_tool_calls_merge
@@ -122,12 +126,14 @@ if __name__ == "__main__":
 
     print("Qdrant")
     print(f"  QDRANT_URL           = {QDRANT_URL}")
+    print(f"  QDRANT_COLLECTION    = {QDRANT_COLLECTION}")
+    print(f"  QDRANT_EMBEDDING_MODEL = {QDRANT_EMBEDDING_MODEL}")
 
     print("Redis")
     print(f"  REDIS_URL            = {REDIS_URL if REDIS_URL else '(not set — Redis disabled)'}")
 
-    print("Sigma rules")
-    print(f"  SIGMA_RULES_PATH     = {SIGMA_RULES_PATH}")
+    print("FP tracking")
+    print(f"  FP_DB_PATH           = {FP_DB_PATH}")
 
     print("Tunables")
     print(f"  AGENT1_MAX_ITERATIONS_NEW   = {AGENT1_MAX_ITERATIONS_NEW}")

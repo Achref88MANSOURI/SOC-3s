@@ -19,10 +19,20 @@ Step 2 — Assess impact_if_true (grounded in asset + technique):
   Options: minor | moderate | severe | critical
   Basis: asset criticality, technique severity, scope of affected systems, data sensitivity.
 
-Step 3 — MITRE mapping:
-  Produce an array of {tactic, technique, sub_technique|null, confidence, basis}.
-  Confidence is capped by evidence quality.
-  sub_technique only when evidence specifically supports it.
+Step 3 — MITRE mapping (validate Agent 1's initial mapping, don't replace it blind):
+  The input includes agent1_initial_mitre_mapping — Agent 1's mapping, produced
+  fast from alert context alone, before any evidence was gathered. Approximate,
+  not authoritative. Your job is to validate and refine it against the evidence
+  you now have:
+  - Technique confirmed by evidence → keep it, but set confidence from evidence
+    quality, not from Agent 1's original confidence.
+  - Technique contradicted or unsupported by evidence → drop it, or lower
+    confidence and say why in basis.
+  - Evidence reveals a technique Agent 1 missed → add it.
+  Produce your own final array of {tactic, technique, sub_technique|null,
+  confidence, basis} — this is the mapping that gets returned, not a
+  pass-through of Agent 1's. basis must cite evidence, not repeat Agent 1's
+  original basis. sub_technique only when evidence specifically supports it.
 
 Step 4 — Verdict:
   Options: true_positive | false_positive | needs_review

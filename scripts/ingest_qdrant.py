@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Populate Qdrant collections: mitre_attack, cve, playbooks.
+"""Populate Qdrant's shared triage_kb collection with MITRE ATT&CK, CVE, and
+playbook data.
 
 Usage:
   python scripts/ingest_qdrant.py mitre                    # MITRE ATT&CK
@@ -14,13 +15,10 @@ import argparse
 import hashlib
 import json
 import logging
-import os
-import re
 import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,21 +30,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, PointStruct, VectorParams
+    from qdrant_client.models import (
+        Distance,
+        FieldCondition,
+        Filter,
+        FilterSelector,
+        MatchValue,
+        PointStruct,
+        VectorParams,
+    )
 except ImportError:
-    logger.error("qdrant-client not installed. pip install qdrant-client fastembed")
+    logger.error("qdrant-client not installed. pip install qdrant-client sentence-transformers")
     sys.exit(1)
 
-from config import QDRANT_URL
+from config import QDRANT_COLLECTION, QDRANT_EMBEDDING_MODEL, QDRANT_URL
 
-EMBED_MODEL = "BAAI/bge-small-en"
-EMBED_DIM = 384
+# Must match tools/qdrant.py exactly: one shared Qdrant collection
+# (QDRANT_COLLECTION, default "triage_kb"), 1024-dim vectors from
+# sentence-transformers' BAAI/bge-m3 — not fastembed, whose supported models
+# don't produce 1024-dim vectors (confirmed empirically in tools/qdrant.py) —
+# discriminated by a "collection" payload field. This script used to create
+# three separate named Qdrant collections with fastembed/bge-small 384-dim
+# vectors, silently incompatible with what tools/qdrant.py actually queries.
+# See REPO-STATUS.md §9 for how that was found.
+EMBED_DIM = 1024
 
-COLLECTION_CONFIGS = {
-    "mitre_attack": VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
-    "cve": VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
-    "playbooks": VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
-}
+# Discriminator values for the shared collection's "collection" payload
+# field — must match tools/qdrant.py::_search()'s kb_collection argument
+# exactly. Note "cve_intel", not "cve" — the two used to disagree.
+KB_MITRE = "mitre_attack"
+KB_CVE = "cve_intel"
+KB_PLAYBOOKS = "playbooks"
 
 MITRE_JSON_URL = (
     "https://raw.githubusercontent.com/mitre/cti/master/"
@@ -56,31 +70,55 @@ CVE_API_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 CVE_BATCH_SIZE = 200
 CVE_MAX = 5000
 
+_embedder = None  # sentence-transformers is a heavy import — load lazily, once
+
 
 def _get_client() -> QdrantClient:
     return QdrantClient(url=QDRANT_URL)
 
 
-def _ensure_collection(client: QdrantClient, name: str):
-    vec_cfg = COLLECTION_CONFIGS.get(name)
-    if not vec_cfg:
-        raise ValueError(f"Unknown collection: {name}")
-    existing = client.collection_exists(name)
-    if existing:
-        logger.info("Collection '%s' already exists — recreating", name)
-        client.delete_collection(name)
-    client.create_collection(name, vectors_config=vec_cfg)
-    logger.info("Created collection '%s' (dim=%d, distance=%s)", name, EMBED_DIM, Distance.COSINE)
+def _get_embedder():
+    global _embedder
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+        _embedder = SentenceTransformer(QDRANT_EMBEDDING_MODEL)
+    return _embedder
+
+
+def _ensure_shared_collection(client: QdrantClient):
+    """Create the shared collection once if it doesn't exist yet. Never delete
+    it here — unlike the old per-type-collection design, this one collection
+    holds all three kb types, so a single ingest_mitre()/ingest_cve()/
+    ingest_playbooks() run must not wipe the other two types' data."""
+    if client.collection_exists(QDRANT_COLLECTION):
+        logger.info("Collection '%s' already exists — reusing", QDRANT_COLLECTION)
+        return
+    client.create_collection(
+        QDRANT_COLLECTION,
+        vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
+    )
+    logger.info("Created collection '%s' (dim=%d, distance=%s)", QDRANT_COLLECTION, EMBED_DIM, Distance.COSINE)
+
+
+def _clear_kb_type(client: QdrantClient, kb_collection: str):
+    """Delete existing points for this discriminator value only, so re-running
+    a single type (e.g. 'mitre') refreshes just that type's points instead of
+    duplicating them or touching the other two types sharing this collection."""
+    client.delete(
+        collection_name=QDRANT_COLLECTION,
+        points_selector=FilterSelector(
+            filter=Filter(must=[FieldCondition(key="collection", match=MatchValue(value=kb_collection))])
+        ),
+    )
 
 
 def _embed(texts: list[str], batch: int = 10) -> list[list[float]]:
     import gc
-    from fastembed import TextEmbedding
-    model = TextEmbedding(EMBED_MODEL)
+    model = _get_embedder()
     all_vecs: list[list[float]] = []
     for i in range(0, len(texts), batch):
         chunk = texts[i : i + batch]
-        for vec in model.embed(chunk):
+        for vec in model.encode(chunk):
             all_vecs.append(vec.tolist())
         gc.collect()
         if (i + batch) % 100 < batch:
@@ -88,18 +126,18 @@ def _embed(texts: list[str], batch: int = 10) -> list[list[float]]:
     return all_vecs
 
 
-def _upsert(client: QdrantClient, collection: str, points: list[PointStruct], batch: int = 50):
+def _upsert(client: QdrantClient, points: list[PointStruct], batch: int = 50):
     import gc
     for i in range(0, len(points), batch):
         chunk = points[i : i + batch]
-        client.upsert(collection, chunk)
+        client.upsert(QDRANT_COLLECTION, chunk)
         del chunk
         gc.collect()
         logger.info("  upserted %d/%d points", min(i + batch, len(points)), len(points))
 
 
-def _stable_id(key: str) -> int:
-    return int(hashlib.sha256(key.encode()).hexdigest()[:16], 16)
+def _stable_id(kb_collection: str, key: str) -> int:
+    return int(hashlib.sha256(f"{kb_collection}:{key}".encode()).hexdigest()[:16], 16)
 
 
 def _fetch_json(url: str, retries: int = 3) -> dict:
@@ -138,7 +176,8 @@ def ingest_mitre(client: QdrantClient | None = None):
     logger.info("=== Ingesting MITRE ATT&CK ===")
     if client is None:
         client = _get_client()
-    _ensure_collection(client, "mitre_attack")
+    _ensure_shared_collection(client)
+    _clear_kb_type(client, KB_MITRE)
 
     logger.info("Downloading MITRE ATT&CK data from MITRE CTI...")
     bundle = _fetch_json(MITRE_JSON_URL)
@@ -167,7 +206,6 @@ def ingest_mitre(client: QdrantClient | None = None):
 
     for obj in techniques:
         name = obj.get("name", "")
-        stix_id = obj.get("id", "")
         description = obj.get("description", "") or ""
         technique_id = ""
         external_refs = obj.get("external_references", [])
@@ -180,7 +218,6 @@ def ingest_mitre(client: QdrantClient | None = None):
             continue
 
         is_sub = obj.get("x_mitre_is_subtechnique", False)
-        sub_technique = name if is_sub else ""
 
         kill_chain = obj.get("kill_chain_phases", [])
         obj_tactics = []
@@ -213,26 +250,32 @@ def ingest_mitre(client: QdrantClient | None = None):
             f"Tactics: {tactic_str}"
         )
 
+        # Payload shape must match tools/qdrant.py::retrieve_mitre() exactly:
+        # top-level text/source/collection, structured fields under metadata.
         payload = {
-            "technique_id": technique_id,
-            "technique": name,
-            "tactic": tactic_str,
-            "sub_technique": sub_technique,
-            "description": description[:3000] if description else "",
-            "parent_technique": parent_technique,
+            "text": content,
+            "source": technique_id,
+            "collection": KB_MITRE,
+            "metadata": {
+                "technique_id": technique_id,
+                "name": name,
+                "tactics": obj_tactics,
+                "is_subtechnique": is_sub,
+                "parent_technique": parent_technique,
+            },
         }
 
         texts.append(text_for_embed)
         payloads.append(payload)
 
-    logger.info("Embedding %d MITRE entries with %s...", len(texts), EMBED_MODEL)
+    logger.info("Embedding %d MITRE entries with %s...", len(texts), QDRANT_EMBEDDING_MODEL)
     vectors = _embed(texts)
 
-    for i, (vec, payload) in enumerate(zip(vectors, payloads)):
-        pid = _stable_id(payload["technique_id"])
+    for vec, payload in zip(vectors, payloads):
+        pid = _stable_id(KB_MITRE, payload["metadata"]["technique_id"])
         points.append(PointStruct(id=pid, vector=vec, payload=payload))
 
-    _upsert(client, "mitre_attack", points)
+    _upsert(client, points)
     logger.info("MITRE ATT&CK ingestion done — %d points", len(points))
 
 
@@ -240,7 +283,8 @@ def ingest_cve(client: QdrantClient | None = None, max_cves: int = CVE_MAX):
     logger.info("=== Ingesting CVE data from NVD ===")
     if client is None:
         client = _get_client()
-    _ensure_collection(client, "cve")
+    _ensure_shared_collection(client)
+    _clear_kb_type(client, KB_CVE)
 
     points: list[PointStruct] = []
     texts: list[str] = []
@@ -302,11 +346,24 @@ def ingest_cve(client: QdrantClient | None = None, max_cves: int = CVE_MAX):
                 f"Affected: {affected_str[:200]}"
             )
 
+            # Payload shape must match tools/qdrant.py::retrieve_cve() exactly:
+            # top-level text/source/collection, structured fields under
+            # metadata. retrieve_cve() joins vendor_project + product with a
+            # space to build affected_software — this NVD cpeMatch extraction
+            # doesn't cleanly separate vendor from product, so the combined
+            # string goes into vendor_project and product is left empty
+            # rather than guessed (pre-existing extraction limitation, not
+            # changed here).
             payload = {
-                "cve_id": cve_id,
-                "description": description[:3000],
-                "cvss_score": cvss_score,
-                "affected_software": affected_str,
+                "text": description[:3000],
+                "source": cve_id,
+                "collection": KB_CVE,
+                "metadata": {
+                    "cve_id": cve_id,
+                    "vendor_project": affected_str,
+                    "product": "",
+                    "cvss_score": cvss_score,
+                },
             }
 
             texts.append(text_for_embed)
@@ -325,11 +382,11 @@ def ingest_cve(client: QdrantClient | None = None, max_cves: int = CVE_MAX):
     logger.info("Embedding %d CVE entries...", len(texts))
     vectors = _embed(texts)
 
-    for i, (vec, payload) in enumerate(zip(vectors, payloads)):
-        pid = _stable_id(payload["cve_id"])
+    for vec, payload in zip(vectors, payloads):
+        pid = _stable_id(KB_CVE, payload["metadata"]["cve_id"])
         points.append(PointStruct(id=pid, vector=vec, payload=payload))
 
-    _upsert(client, "cve", points)
+    _upsert(client, points)
     logger.info("CVE ingestion done — %d points", len(points))
 
 
@@ -337,7 +394,8 @@ def ingest_playbooks(client: QdrantClient | None = None, playbooks_dir: str = ".
     logger.info("=== Ingesting playbooks from %s ===", playbooks_dir)
     if client is None:
         client = _get_client()
-    _ensure_collection(client, "playbooks")
+    _ensure_shared_collection(client)
+    _clear_kb_type(client, KB_PLAYBOOKS)
 
     root = Path(playbooks_dir).resolve()
     if not root.is_dir():
@@ -389,11 +447,17 @@ def ingest_playbooks(client: QdrantClient | None = None, playbooks_dir: str = ".
 
     for key, (content, tags, title) in content_map.items():
         text_for_embed = f"{title}\n{' '.join(tags)}\n{content[:2000]}"
+        # Payload shape must match tools/qdrant.py::retrieve_playbooks()
+        # exactly: top-level text/source/collection, title/mitre_techniques
+        # under metadata.
         payload = {
-            "title": title,
-            "content": content[:5000],
-            "tags": tags,
+            "text": content[:5000],
             "source": key,
+            "collection": KB_PLAYBOOKS,
+            "metadata": {
+                "title": title,
+                "mitre_techniques": tags,
+            },
         }
         texts.append(text_for_embed)
         payloads.append(payload)
@@ -401,11 +465,11 @@ def ingest_playbooks(client: QdrantClient | None = None, playbooks_dir: str = ".
     logger.info("Embedding %d playbook entries...", len(texts))
     vectors = _embed(texts)
 
-    for i, (vec, payload) in enumerate(zip(vectors, payloads)):
-        pid = _stable_id(payload["source"])
+    for vec, payload in zip(vectors, payloads):
+        pid = _stable_id(KB_PLAYBOOKS, payload["source"])
         points.append(PointStruct(id=pid, vector=vec, payload=payload))
 
-    _upsert(client, "playbooks", points)
+    _upsert(client, points)
     logger.info("Playbooks ingestion done — %d points", len(points))
 
 

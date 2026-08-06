@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from schemas import TriageState, TriageResult
+from tools.fp_tracking import record_triage_outcome
 
 SEVERITY_TABLE = {
     ("unlikely", "minor"): "low",
@@ -85,6 +86,13 @@ def format_output(state: TriageState) -> TriageState:
         return state
 
     severity = SEVERITY_TABLE.get((verdict.likelihood, verdict.impact_if_true), "medium")
+
+    record_triage_outcome(
+        rule_uuid=alert.rule.uuid if alert and alert.rule else "",
+        host=alert.host.hostname if alert and alert.host else "",
+        is_fp=verdict.verdict == "false_positive",
+        verdict_confidence=verdict.likelihood,
+    )
 
     state["triage_result"] = TriageResult(
         alert_id=alert_id,

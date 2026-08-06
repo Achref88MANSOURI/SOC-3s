@@ -81,7 +81,14 @@ def analyze(state: TriageState) -> TriageState:
     if mode == "new":
         evidence = state.get("evidence_package")
         evidence_summary = _summarize_evidence(evidence)
+        agent1_mitre_mapping = state.get("mitre_mapping") or []
+        agent1_mapping_dump = [
+            m.model_dump() if hasattr(m, "model_dump") else m for m in agent1_mitre_mapping
+        ]
         human_content = (
+            f"agent1_initial_mitre_mapping (fast, approximate — made from alert context "
+            f"alone before evidence was gathered; validate and refine against the "
+            f"evidence below, do not copy blindly):\n{json.dumps(agent1_mapping_dump, indent=2, default=str)}\n\n"
             f"evidence_package_summary:\n{json.dumps(evidence_summary, indent=2)}\n\n"
             f"Respond with ONLY valid JSON matching this schema:\n{json.dumps(schema)}"
         )
