@@ -1399,3 +1399,112 @@ correctly come from `config.py` rather than being hardcoded again).
 
 `REPO-STATUS.md` updated in the same commit to mark this finding resolved
 rather than open.
+
+## Post-Phase-F — `alert_builder.py` rewritten to parse the real raw Security Onion payload, not n8n's flattened alert
+
+**Context / how this was found:** `REPO-STATUS.md` and `CLAUDE.md` both
+described `raw_alert` ambiguously. Working through the actual n8n workflow
+with the project owner established the real production contract: n8n forwards
+the alert to `/triage` exactly as it arrives from Security Onion's own
+webhook — untouched, full technical telemetry (`event_data.*`, `rule.*`,
+network/file fields) — not a flattened, n8n-Alert-Builder-constructed
+TheHive-alert-shaped JSON, which is what `alert_builder.py`'s existing
+field-path assumptions had actually been built around. The curated IOC list
+and Cortex analyzer verdicts, meanwhile, only exist on the TheHive alert
+record (`hive_alert`, fetched via
+`get_full_alert_with_analysis(thehive_alert_id)`), since n8n's own Alert
+Builder + Cortex-analyzer step already ran before `/triage` is ever called.
+Neither source is a substitute for the other — technical detail only exists
+on `raw_alert`, IOC verdicts only exist on `hive_alert`.
+
+Three independent references were used to verify every field path against
+real Security Onion behavior, not guesses:
+- A live-captured raw Sigma alert payload (real production data, one example).
+- `so-ingest-reference/` and `so-alert-reference/` — sparse/partial clones of
+  the official `Security-Onion-Solutions/securityonion` GitHub repo. The
+  per-engine Elasticsearch ingest pipelines (`sysmon`, `suricata.alert`/
+  `suricata.common`, `strelka.file`, `common`/`common.nids`/`ecs`) confirm the
+  `event_data`/network/file field paths per engine. `so-alert-reference`
+  additionally has `so-ioc-normalize` (the `final_pipeline` that builds the
+  `ioc.*` wrapper — confirmed shared across all three engines, not
+  Sigma-specific) and `securityonion-es.py` (the actual Python source of
+  Security Onion's Sigma `elastalert` alerter class — 100% authoritative, not
+  inferred).
+- `reference.txt` — a live Elasticsearch `_mapping` dump for
+  `logs-detections.alerts-so` (Sigma's own alert index — confirmed
+  Sigma-exclusive; Suricata/YARA write to separate indices), merged across 24
+  rollover backing indices spanning ~4 weeks of real production alerts and
+  flattened to 467 unique field paths. This confirmed every wrapper field
+  (`ioc.*`, `event.*`, `rule.*`, `sigma_level`, `@timestamp`) is stable across
+  real traffic, and surfaced that Sigma rules in this deployment also match
+  against at least 4 `event_data` telemetry shapes beyond the Elastic-Defend
+  process shape already handled (native `winlog.*`, PowerShell
+  `powershell.*` engine logs, `system.auth.ssh.*`, and Kratos/HTTP
+  `login_flow.*`). These four are left as graceful no-ops for now — not
+  implemented — since they weren't confirmed as in-scope for this
+  deployment's triage needs; every extractor already degrades to `None`
+  rather than raising, so this is a coverage gap, not a bug.
+
+**Fixes to `alert_builder.py` (field-path corrections; no schema changes):**
+
+1. `_source_engine` — now reads `raw_alert["ioc"]["source_engine"]` first
+   (confirmed via `so-ioc-normalize`'s own source: `ioc.source_engine =
+   event.module`, computed identically for all three engines), falling back
+   to `event.module` directly, then the pre-existing `type`/tags checks.
+   Previously read only `raw_alert["type"]`, which doesn't exist on real raw
+   SO docs — `source_engine` was silently resolving to `"unknown"` for every
+   real alert, which meant `investigation_profile` was always `"generic"`
+   instead of the engine-specific prompt block.
+2. `_native_severity` (new helper, used by `_parse_rule`) — fallback chain is
+   now top-level `severity` (defensive) → `event.severity` (confirmed
+   cross-engine-normalized field via `common`/`common.nids`/
+   `so-ioc-normalize`; deliberately not falling back to Suricata's own
+   `rule.severity`, which is pre-normalization and inverted) → default `2`.
+   Previously only checked top-level `severity`, which real raw SO docs don't
+   have.
+3. `_parse_timestamp` — now reads `@timestamp` (ISO8601, confirmed universal
+   ECS field) as primary, `date` (epoch-ms) kept as a secondary fallback.
+   Previously only read `date`, so every real alert's timestamp silently
+   defaulted to "now".
+4. `_extract_file_from_raw_alert` — hash now read from top-level
+   `raw_alert["hash"]` first (confirmed via `strelka.file`'s ingest pipeline:
+   `scan.hash` renames to a top-level field, sibling of `file`, not nested
+   under it), `file.hash` kept as a defensive fallback.
+5. `alert_id` fallback chain gained `raw_alert["_id"]` (the real,
+   always-present Elasticsearch doc id) between `sourceRef` and
+   `title`/`"unknown"`.
+6. `_build_observables` now reads from `hive_alert["observables"]`, not
+   `raw_alert["observables"]` — raw SO alert docs never carry an observables
+   list at all (that's purely a TheHive concept); this field was silently
+   always empty in production before this fix, meaning the curated,
+   Cortex-scored IOC list n8n and Cortex already produced never reached the
+   triage pipeline.
+7. New `_extract_ioc_indicators` + `_merge_observables` — supplements the
+   `hive_alert`-sourced list with `raw_alert["ioc"]["indicators"]`
+   (Security-Onion-computed directly on the alert, confirmed via
+   `so-ioc-normalize`'s source — rich for Suricata/network alerts, typically
+   empty for process-creation Sigma alerts, since that pipeline never reads
+   `event_data`). Catches IOCs Security Onion itself derived that n8n's
+   extraction might not have flagged as an observable.
+
+Everything describing *what happened technically* — `host`, `user`,
+`process` (including the full parent-process chain, working directory, PID),
+`network`, `file` — was already being read correctly from `raw_alert`'s
+`event_data`/top-level fields and is unchanged by this pass; only the wrapper
+fields (engine, severity, timestamp, id) and the observables source needed
+fixing.
+
+**Also this session:** `N8N-INTEGRATION.md` removed — the n8n workflow lives
+outside this repo, and the document had drifted from how the integration
+actually works (see above).
+
+**Not done, left as an open decision for the project owner:** extending
+`_extract_process_from_event_data`/`_extract_host_from_event_data`/
+`_extract_user_from_event_data` to handle the `winlog`/`powershell`/`ssh`/
+`login_flow` `event_data` shapes surfaced by `reference.txt` (see above).
+
+`pytest tests/ -v`: **160/160 passing** (was 154; +6 net new tests covering
+the real raw-SO-doc shape end to end, the `ioc.source_engine`/`event.module`
+fallback, the `event.severity` fallback, the `@timestamp`-vs-`date`
+precedence, the top-level-vs-nested YARA hash location, and confirming
+`raw_alert.observables` is now correctly ignored).

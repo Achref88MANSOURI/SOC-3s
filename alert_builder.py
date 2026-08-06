@@ -61,10 +61,25 @@ def _classify_observable_type(data_type: str, value: str) -> str:
 
 
 def _source_engine(raw_alert: dict) -> str:
+    """so-ioc-normalize sets ioc.source_engine = event.module for every engine
+    (Sigma/Suricata/YARA all funnel through this same final_pipeline) — confirmed
+    from Security Onion's own pipeline source, not inferred. event.module is the
+    same value one level up in case the ioc.* wrapper hasn't run yet. type/tags
+    are legacy fallbacks for non-raw-SO-shaped callers (e.g. a TheHive-alert-shaped
+    raw_alert), kept for defense, not expected to fire on real SO payloads."""
+    ioc = _as_dict(raw_alert.get("ioc"))
+    engine = (ioc.get("source_engine") or "").lower()
+    if engine:
+        return engine
+    engine = (_as_dict(raw_alert.get("event")).get("module") or "").lower()
+    if engine:
+        return engine
     engine = (raw_alert.get("type") or "").lower()
     if engine:
         return engine
     for tag in raw_alert.get("tags", []) or []:
+        if not isinstance(tag, str):
+            continue
         m = ENGINE_TAG_RE.match(tag)
         if m:
             return m.group(1).lower()
@@ -97,8 +112,23 @@ def _parse_rule(raw_alert: dict, description: str) -> Rule:
     return Rule(
         name=name,
         uuid=str(uuid) if uuid else "",
-        native_severity=raw_alert.get("severity", 2),
+        native_severity=_native_severity(raw_alert),
     )
+
+
+def _native_severity(raw_alert: dict) -> int:
+    """event.severity is the cross-engine-normalized field (confirmed via
+    Security Onion's common/common.nids/so-ioc-normalize pipelines — Suricata's
+    own rule.severity is pre-normalization and inverted, 1=highest, so it's
+    deliberately NOT used here). Top-level severity is a defensive fallback for
+    non-raw-SO-shaped callers only."""
+    value = raw_alert.get("severity")
+    if isinstance(value, int):
+        return value
+    event_severity = _as_dict(raw_alert.get("event")).get("severity")
+    if isinstance(event_severity, int):
+        return event_severity
+    return 2
 
 
 def _parse_host(raw_alert: dict, description: str) -> Host | None:
@@ -237,15 +267,19 @@ def _extract_network_from_raw_alert(raw_alert: dict) -> Network | None:
 
 def _extract_file_from_raw_alert(raw_alert: dict) -> tuple[File | None, HashBundle]:
     """YARA/Strelka alerts carry file context at the top level, not under
-    event_data — confirmed: file.name, file.path, file.hash.md5,
-    file.hash.sha256. No process/user/network fields are guaranteed for these
-    alerts."""
+    event_data — confirmed: file.name, file.path, file.mime_type (renamed from
+    file.flavors.mime). Hashes are NOT nested under file.hash — Security Onion's
+    own strelka.file ingest pipeline renames scan.hash to a top-level `hash`
+    field, sibling of `file`, not nested under it (confirmed from so-ingest-
+    reference). file.hash is checked too, defensively, in case a differently-
+    shaped caller nests it there. No process/user/network fields are guaranteed
+    for these alerts."""
     file_data = _as_dict(raw_alert.get("file"))
     hashes = HashBundle()
     if not file_data:
         return None, hashes
 
-    hash_data = _as_dict(file_data.get("hash"))
+    hash_data = _as_dict(raw_alert.get("hash")) or _as_dict(file_data.get("hash"))
     for field in ("md5", "sha1", "sha256", "sha512"):
         value = hash_data.get(field)
         if value:
@@ -265,19 +299,35 @@ def _extract_file_from_raw_alert(raw_alert: dict) -> tuple[File | None, HashBund
 
 
 def _parse_timestamp(raw_alert: dict) -> datetime:
+    """@timestamp (ISO8601) is the real raw-SO-doc field — confirmed universal
+    across the live logs-detections.alerts-so mapping and every ingest pipeline
+    reviewed (all standardize on it as the ECS timestamp field). `date` (epoch-ms)
+    is kept as a fallback for non-raw-SO-shaped callers only."""
+    raw_ts = raw_alert.get("@timestamp")
+    if isinstance(raw_ts, str):
+        try:
+            return datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            pass
     date_ms = raw_alert.get("date")
     if isinstance(date_ms, (int, float)):
         return datetime.fromtimestamp(date_ms / 1000, tz=timezone.utc)
     return datetime.now(timezone.utc)
 
 
-def _build_observables(raw_alert: dict) -> Observables:
+def _build_observables(hive_alert: dict | None) -> Observables:
+    """Raw SO alert docs never carry an `observables` list at all — that's purely
+    a TheHive concept. The curated, IOC-flagged, Cortex-scored list only exists
+    on hive_alert (n8n's Alert Builder created these observables and Cortex
+    already scored them before /triage was ever called) — so this reads from
+    hive_alert, not raw_alert. See _extract_ioc_indicators for the supplementary
+    raw_alert-derived recovery pass."""
     external_ips: list[str] = []
     domains: list[str] = []
     urls: list[str] = []
     hashes = HashBundle()
 
-    for obs in raw_alert.get("observables", []) or []:
+    for obs in (hive_alert or {}).get("observables", []) or []:
         value = obs.get("data", "")
         if not value:
             continue
@@ -300,6 +350,51 @@ def _build_observables(raw_alert: dict) -> Observables:
             # bucket — Agent 1 (perceive) fills this gap with LLM reasoning.
 
     return Observables(external_ips=external_ips, domains=domains, urls=urls, hashes=hashes)
+
+
+def _extract_ioc_indicators(raw_alert: dict) -> Observables:
+    """Security Onion's own so-ioc-normalize final_pipeline computes ioc.indicators
+    directly on raw_alert, before Cortex or n8n ever see it — engine-agnostic,
+    confirmed from SO's pipeline source. It's rich for Suricata/network alerts
+    (source.ip/destination.ip/dns.question.name/url.full are already top-level
+    ECS fields by the time that pipeline runs) and typically empty for
+    process-creation Sigma alerts, since that pipeline never looks inside
+    event_data. Supplementary to hive_alert's curated list, not a replacement —
+    catches IOCs SO itself derived that n8n's extraction might not have flagged."""
+    ioc = _as_dict(raw_alert.get("ioc"))
+    external_ips: list[str] = []
+    domains: list[str] = []
+    urls: list[str] = []
+    hashes = HashBundle()
+
+    for ind in ioc.get("indicators", []) or []:
+        if not isinstance(ind, dict):
+            continue
+        itype = ind.get("type", "")
+        value = ind.get("value", "")
+        if not value:
+            continue
+        if itype == "ip":
+            external_ips.append(value)
+        elif itype == "domain":
+            domains.append(value)
+        elif itype == "url":
+            urls.append(value)
+        elif itype.startswith("hash_"):
+            algo = itype.split("_", 1)[1]
+            if algo in _HASH_FIELDS:
+                getattr(hashes, algo).append(value)
+
+    return Observables(external_ips=external_ips, domains=domains, urls=urls, hashes=hashes)
+
+
+def _merge_observables(target: Observables, extra: Observables) -> None:
+    for field in ("external_ips", "domains", "urls"):
+        existing = getattr(target, field)
+        for value in getattr(extra, field):
+            if value not in existing:
+                existing.append(value)
+    _merge_hashes(target.hashes, extra.hashes)
 
 
 def _summarize_taxonomies(taxonomies: list[dict]) -> tuple[str, int, str]:
@@ -367,6 +462,12 @@ def build_canonical_alert(
     - YARA/Strelka: no event_data; file context (name, path, hashes) lives at
       the top level of raw_alert — see _extract_file_from_raw_alert. No
       process/user/network fields are guaranteed.
+    Observables (IPs/domains/URLs/hashes) come from hive_alert, not raw_alert —
+    raw SO alert docs never carry an observables list, only TheHive does (see
+    _build_observables). _extract_ioc_indicators supplements this from
+    raw_alert's own ioc.indicators, which Security Onion computes itself
+    directly on the alert (rich for network/Suricata alerts, typically empty
+    for process-creation Sigma alerts).
     Every extractor degrades to None/empty on missing fields rather than
     raising — regexing the description string is the final fallback for
     rule/host identity when no structured field is present. Agent 1 fills any
@@ -376,7 +477,8 @@ def build_canonical_alert(
     event_data = _as_dict(raw_alert.get("event_data"))
 
     cortex_results, observable_ids = _build_cortex_results(hive_alert)
-    observables = _build_observables(raw_alert)
+    observables = _build_observables(hive_alert)
+    _merge_observables(observables, _extract_ioc_indicators(raw_alert))
 
     host = _extract_host_from_event_data(event_data) or _parse_host(raw_alert, description)
     user = _extract_user_from_event_data(event_data)
@@ -390,7 +492,12 @@ def build_canonical_alert(
     _merge_hashes(observables.hashes, file_hashes)
 
     return CanonicalAlert(
-        alert_id=thehive_alert_id or raw_alert.get("sourceRef", "") or raw_alert.get("title", "unknown"),
+        alert_id=(
+            thehive_alert_id
+            or raw_alert.get("sourceRef", "")
+            or raw_alert.get("_id", "")
+            or raw_alert.get("title", "unknown")
+        ),
         timestamp=_parse_timestamp(raw_alert),
         source_engine=source_engine,
         investigation_profile=PROFILE_BY_ENGINE.get(source_engine, "generic"),

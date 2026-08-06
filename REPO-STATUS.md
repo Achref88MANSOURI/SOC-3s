@@ -78,8 +78,9 @@ run tests):**
 - A post-approval case-action module (`nodes/case_action.py`) exists but is
   **not wired into the graph** — see §9.
 
-**Tested:** `pytest tests/ -v` → **154 passed, 0 failed** (verified by running
-it directly during this read-through, not taken from a prior log). Coverage
+**Tested:** `pytest tests/ -v` → **160 passed, 0 failed** (verified by running
+it directly; 6 net new tests added when `alert_builder.py` was corrected to
+match the real raw-SO-payload contract, see `CHANGES.md`). Coverage
 spans schemas, alert_builder, all 5 graph nodes, graph routing, all prompt
 builders, detection_rules, fp_tracking, qdrant, and two full end-to-end
 `/triage` round trips (`test_e2e.py`) with every external call mocked
@@ -102,9 +103,9 @@ of this writing.
 
 **Not yet done / explicitly out of scope so far:** live smoke testing against
 real Security Onion/TheHive/Cortex/iTop/Elasticsearch traffic (everything
-above is verified only against mocks and unit fixtures); the n8n workflow
-update described in `N8N-INTEGRATION.md` (documentation only, nothing applied
-to a live n8n instance); wiring `case_action.py` into the graph.
+above is verified only against mocks and unit fixtures); confirming the n8n
+workflow actually forwards the raw SO webhook payload unmodified against a
+live execution log (see §10 item 1); wiring `case_action.py` into the graph.
 
 ---
 
@@ -484,24 +485,30 @@ any tier where the system acts autonomously.
 
 **Done:**
 - Full pipeline code path exists and is unit/integration-tested against
-  mocks (154/154 passing).
+  mocks (160/160 passing).
 - All read-only tool integrations are implemented.
 - Detection-rule lookup now sources from the correct live data (ES
   `so-detection`), fixing what would otherwise have been a silent MITRE-mapping
   gap for every Sigma alert.
 - FP-history tracking is wired into every completed triage automatically.
-- `n8n`-side contract is documented in `N8N-INTEGRATION.md` (slim payload
-  shape, what fields to route on, what nodes to remove).
+- The real `/triage` contract is now confirmed against production n8n
+  behavior, not documentation guesswork: `raw_alert` is Security Onion's raw
+  webhook payload forwarded untouched (full `event_data`/`rule`/network/file
+  telemetry); the curated IOC list + Cortex verdicts live only on the TheHive
+  alert record (`hive_alert`, fetched fresh via `thehive_alert_id`).
+  `alert_builder.py` was rewritten to match this, verified against Security
+  Onion's own ingest-pipeline source and a live Elasticsearch field-mapping
+  dump — see `CHANGES.md`'s "`alert_builder.py` rewritten to parse the real
+  raw Security Onion payload" section for full detail.
+  `N8N-INTEGRATION.md` (removed this session) had documented a different,
+  incorrect contract — a flattened, TheHive-alert-shaped `raw_alert` — that
+  did not match what n8n actually sends.
 
 **Still needed before a live alert can flow through successfully:**
-1. **n8n workflow update** — per `N8N-INTEGRATION.md`: point the existing
-   POST-to-agent-service node at the new slim `AlertWebhookPayload` shape
-   (`thehive_alert_id`, `raw_alert`, `asset_context`), remove the
-   per-observable-type Cortex Switch/analyzer nodes (Agent 2 now triggers
-   Cortex itself, selectively), remove any separate observable-ID-fetch step
-   (agent-service now fetches that itself). Nothing here has been applied to
-   a live n8n instance — this is still a documentation-only deliverable as
-   of this state.
+1. **Confirm the n8n workflow actually forwards the raw SO webhook payload
+   unmodified**, per the corrected contract above — this was confirmed
+   through discussion with the project owner but not yet verified against a
+   live n8n execution log.
 2. ~~Fix the Qdrant ingestion/query mismatch~~ **Fixed** (§9, item 1) —
    `scripts/ingest_qdrant.py` now writes the same collection, dimension,
    embedding model, and payload shape `tools/qdrant.py` reads. Still worth a
@@ -515,7 +522,8 @@ any tier where the system acts autonomously.
    wired in — not required for Tier 0 itself (Tier 0 is advisory-only, no
    auto-action), but n8n's *own* write nodes (which remain the actual actor
    in Tier 0) should be spot-checked against the current `TriageResult`
-   field names per `N8N-INTEGRATION.md` §6's testing checklist.
+   field names directly (n8n-side documentation for this was removed this
+   session — see the note at the top of this section).
 5. **Confirm `.env` on the actual deployment host** has all required vars —
    this worktree only has them because `python-dotenv` walks up to the main
    checkout's `.env`; a real deployment needs its own.
@@ -526,8 +534,9 @@ since it exercises the `event_data` structured-extraction path and the newly
 rewritten `detection_rule_lookup`) through the full n8n → agent-service →
 n8n loop with `action` routing set to *advisory-only* (log/attach the
 `TriageResult`, do not let n8n act on it yet). Confirm: `/health` responds
-first; the `/triage` POST body actually matches the shape `N8N-INTEGRATION.md`
-§1/§2 describes (verify via n8n's execution log, not assumption);
+first; the `/triage` POST body's `raw_alert` actually is Security Onion's raw
+webhook payload, unmodified, per the corrected contract above (verify via
+n8n's execution log, not assumption);
 `/triage` returns `200` with a well-formed `TriageResult`, not a `500`;
 `investigation_trace` shows real tool calls (not an empty list, which would
 indicate the ReAct agent produced no tool calls at all — a red flag);
@@ -542,13 +551,12 @@ branches before broadening to real traffic volume.
 
 ```
 .
-├── alert_builder.py            Deterministic (non-LLM) CanonicalAlert assembly from n8n's raw_alert + TheHive fetch
+├── alert_builder.py            Deterministic (non-LLM) CanonicalAlert assembly from the raw Security Onion webhook payload + TheHive fetch
 ├── CHANGES.md                  Running development log — phase-by-phase history, decisions, test counts, known issues
 ├── CLAUDE.md                   Project instructions for Claude Code — architecture summary, commands, invariants
 ├── config.py                   Loads .env, fails fast on missing required vars, exposes Settings + module-level constants
 ├── graph.py                    LangGraph StateGraph definition — 5 nodes, gate0/perceive conditional routing
 ├── main.py                     FastAPI app — POST /triage, GET /health
-├── N8N-INTEGRATION.md          Documentation-only: required n8n workflow changes to match the current /triage contract
 ├── nodes/
 │   ├── __init__.py             Empty
 │   ├── analyze.py              Agent 3 — single LLM call, produces TriageVerdict/DeltaVerdict, safe fallback on parse failure
@@ -571,7 +579,7 @@ branches before broadening to real traffic volume.
 ├── tests/
 │   ├── __init__.py               Empty
 │   ├── conftest.py               Autouse fixture isolating every test's FP_DB_PATH to a tmp_path
-│   ├── test_alert_builder.py     11 tests — per-engine structured extraction, regex fallback, observable mislabel correction
+│   ├── test_alert_builder.py     17 tests — per-engine structured extraction, regex fallback, real-raw-SO-doc shape, ioc.*/event.severity/@timestamp fallbacks, observables sourced from hive_alert not raw_alert
 │   ├── test_analyze.py           11 tests — JSON extraction, evidence summarization, Agent-3-not-Agent-1 mapping assertion
 │   ├── test_case_action.py       11 tests — all 4 case actions, approval gate, error paths
 │   ├── test_detection_rules.py   10 tests — ES-mocked, all Sigma tag namespaces, Suricata with/without MITRE, YARA, errors
