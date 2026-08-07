@@ -5,16 +5,16 @@ import logging
 
 from langchain_openai import ChatOpenAI
 
-from config import settings
+from config import LLM_ANALYZE_API_KEY, LLM_ANALYZE_BASE_URL, LLM_ANALYZE_MODEL
 from prompts.analyst import build_prompt, output_schema
 from schemas import DeltaVerdict, TriageState, TriageVerdict
 
 logger = logging.getLogger("agent-service.analyze")
 
 _llm = ChatOpenAI(
-    base_url=settings.llm_base_url,
-    api_key=settings.llm_api_key or "sk-no-auth",
-    model=settings.llm_model,
+    base_url=LLM_ANALYZE_BASE_URL,
+    api_key=LLM_ANALYZE_API_KEY or "sk-no-auth",
+    model=LLM_ANALYZE_MODEL,
     temperature=0.0,
     max_tokens=1024,
 )
