@@ -47,6 +47,10 @@ class Settings:
     llm_model: str = field(default_factory=lambda: os.environ["LLM_MODEL"])
     llm_api_key: str = field(default_factory=lambda: os.environ.get("LLM_API_KEY", ""))
 
+    llm_analyze_base_url: str = field(default_factory=lambda: os.environ.get("LLM_ANALYZE_BASE_URL", "").rstrip("/") or os.environ["LLM_BASE_URL"].rstrip("/"))
+    llm_analyze_model: str = field(default_factory=lambda: os.environ.get("LLM_ANALYZE_MODEL", "") or os.environ["LLM_MODEL"])
+    llm_analyze_api_key: str = field(default_factory=lambda: os.environ.get("LLM_ANALYZE_API_KEY", "") or os.environ.get("LLM_API_KEY", ""))
+
     qdrant_url: str = field(default_factory=lambda: os.environ.get("QDRANT_URL", "http://localhost:6333"))
     qdrant_collection: str = field(default_factory=lambda: os.environ.get("QDRANT_COLLECTION", "triage_kb"))
     qdrant_embedding_model: str = field(default_factory=lambda: os.environ.get("QDRANT_EMBEDDING_MODEL", "BAAI/bge-m3"))
@@ -79,6 +83,10 @@ ES_API_KEY: str = settings.es_api_key
 LLM_BASE_URL: str = settings.llm_base_url
 LLM_MODEL: str = settings.llm_model
 LLM_API_KEY: str = settings.llm_api_key
+
+LLM_ANALYZE_BASE_URL: str = settings.llm_analyze_base_url
+LLM_ANALYZE_MODEL: str = settings.llm_analyze_model
+LLM_ANALYZE_API_KEY: str = settings.llm_analyze_api_key
 
 QDRANT_URL: str = settings.qdrant_url
 QDRANT_COLLECTION: str = settings.qdrant_collection
@@ -119,10 +127,15 @@ if __name__ == "__main__":
     print(f"  ES_URL               = {ES_URL}")
     print(f"  ES_API_KEY           = {_mask(ES_API_KEY)}")
 
-    print("LLM")
+    print("LLM (shared — perceive, investigate)")
     print(f"  LLM_BASE_URL         = {LLM_BASE_URL}")
     print(f"  LLM_MODEL            = {LLM_MODEL}")
     print(f"  LLM_API_KEY          = {_mask(LLM_API_KEY) if LLM_API_KEY else '(not set)'}")
+
+    print("LLM (analyze — set separately to use a different model)")
+    print(f"  LLM_ANALYZE_BASE_URL = {LLM_ANALYZE_BASE_URL}")
+    print(f"  LLM_ANALYZE_MODEL    = {LLM_ANALYZE_MODEL}")
+    print(f"  LLM_ANALYZE_API_KEY  = {_mask(LLM_ANALYZE_API_KEY) if LLM_ANALYZE_API_KEY else '(not set)'}")
 
     print("Qdrant")
     print(f"  QDRANT_URL           = {QDRANT_URL}")
