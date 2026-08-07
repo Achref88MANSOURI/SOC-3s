@@ -27,14 +27,25 @@ an empty list, the agents cannot distinguish *"I searched and found no threat"* 
 evidence of absence, and the Analyst — reasoning correctly over what it was given —
 concludes there is nothing there.
 
-The result, observed in production: **a credential-dumping tool download was
-auto-closed as a false positive, twice.**
+A second, unrelated defect does the same to the CMDB: `tools/itop.py` speaks JSON-RPC
+to a REST API that expects `operation`, and the resulting protocol error is parsed as
+`"No asset found"`. Asset criticality has therefore never been retrieved, for any host.
+
+Between them, these two outages kill **both** inputs to the Analyst's
+`impact_if_true` axis — asset criticality (iTop) and technique severity (MITRE, via
+Elasticsearch). That axis has **zero working inputs** today.
+
+The result, observed in production: **a credential-dumping tool download was scored
+`low` and auto-closed as a false positive, twice.**
 
 That verdict was then written back into the FP-tracking database, which feeds the
 next triage of the same rule. The system is currently teaching itself that this
 attack is benign.
 
-**Three findings block production use. They are P0-1, P0-2, and P0-3 below.**
+**Four findings block production use: P0-1 through P0-4 below.**
+
+> Companion document: **`ARCHITECTURE-LIVE.md`** — what each backend is for, what it is
+> supposed to return, and every path an alert can take through the system.
 
 ---
 
@@ -472,23 +483,63 @@ above either stated number. Align all three.
 
 ---
 
-### P2-13 — iTop: injectable OQL, admin credentials, and one asset class **[CODE]**
+### P0-4 — iTop asset lookup has never worked, for any host, ever **[VERIFIED]**
 
-`itop.py:39`:
+> Originally filed as P2-13 (class coverage). Live probing showed the cause is far more
+> fundamental: **the wrong wire protocol**. Promoted to P0 — this is a second complete
+> tool outage, independent of Elasticsearch, and it removes the only source of asset
+> criticality.
+
+**Bug 1 — wrong protocol.** `itop.py:12-29` sends JSON-RPC:
 
 ```python
-"key": f"SELECT Server WHERE (name = '{hostname_or_ip}' OR ip = '{hostname_or_ip}')",
+payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
 ```
 
-- **OQL injection** — `hostname_or_ip` is interpolated unescaped. It originates from
-  alert data, i.e. from a potentially attacker-controlled endpoint hostname. A single
-  quote breaks the query; crafted input alters it.
+iTop's REST API is **not** JSON-RPC. It expects a flat payload keyed on `operation`.
+Live response to the code's exact request:
+
+```json
+{"code": 100, "message": "Error: Missing parameter 'operation'"}
+```
+
+**Bug 2 — response parsing.** `itop.py:47` reads
+`result.get("result", {}).get("objects", {})`. iTop returns a **flat** object with no
+`result` wrapper, so `objects` is always `{}` — and the real error message above is
+silently discarded and reported as the plausible-looking `"No asset found"`. That is
+why this looked like a data-coverage problem for so long.
+
+**Bug 3 — wrong class.** Queries `class: "Server"`. Live iTop holds **32 CIs across 12
+classes**; only **4** are `Server`.
+
+**Bug 4 — invalid field names.** `business_criticality`, `org_name` and `status` are
+all rejected by iTop with `invalid attribute code`.
+
+**The alert host was in the CMDB the whole time:**
+
+```
+class:               PC                 ← code queries Server only
+name:                win-kvkmd51ggkq
+business_criticity:  medium             ← code asks for "business_criticality"
+organization_name:   IT Department      ← code asks for "org_name"
+```
+
+**Impact.** `asset_context` was `{}` in every production run, so the Analyst had no
+asset criticality — which, together with P0-1 killing MITRE, means **`impact_if_true`
+had zero working inputs**. It returned `minor` in all three runs; combined with
+`likelihood=unlikely`, `SEVERITY_TABLE` yields **`low`** for a credential-dumping tool
+download.
+
+**Fix:** flat `{"operation": "core/get", …}` payload; parse the flat response; query
+`FunctionalCI`; use `business_criticity` / `organization_name`.
+
+**Also, while in this file:**
+
+- **OQL injection** — `itop.py:39` interpolates the hostname unescaped into
+  `SELECT Server WHERE (name = '{hostname_or_ip}' …)`. The hostname comes from alert
+  data, i.e. potentially from a compromised endpoint. Parameterize or escape.
 - **Admin credentials** — `.env` uses `ITOP_USER=admin` with a full-privilege password
-  for what is a strictly read-only lookup. Create a read-only iTop account.
-- **Class coverage** — only `Server` is searched. Both live lookups failed
-  (`"No asset found"` for `win-kvkmd51ggkq` *and* `172.20.24.99`), so asset context was
-  empty in every run. iTop also has `PC`, `VirtualMachine`, `NetworkDevice`. Either
-  query `FunctionalCI` (the parent class) or try several.
+  for a strictly read-only lookup. Create a read-only iTop account.
 
 ---
 
@@ -557,11 +608,18 @@ ES_URL missing :9200  +  verify=True vs self-signed cert   [P0-1]
    ├─→ detection_rule_lookup → {"found": false}
    │      └─→ mitre_mapping: []  (T1105 was available all along)
    │
-   ├─→ elasticsearch_query ×3 → []   (also wrong patterns/fields [P1-4][P1-5])
-   │      └─→ temporal_context: {}
-   │
-   └─→ itop_asset_lookup → not found  (Server-only [P2-13])
-          └─→ asset_context: {}
+   └─→ elasticsearch_query ×3 → []   (also wrong patterns/fields [P1-4][P1-5])
+          └─→ temporal_context: {}
+
+itop.py speaks JSON-RPC to a REST API                      [P0-4]
+   │   ("Missing parameter 'operation'" parsed as "No asset found")
+   └─→ asset_context: {}   (host was there all along, as class PC,
+                            business_criticity=medium)
+                     │
+                     ▼
+   impact_if_true has ZERO working inputs → "minor"
+   likelihood has 1 of 4 → "unlikely"
+   SEVERITY_TABLE[(unlikely, minor)] = "low"
                      │
                      ▼
         Agent 2 emits prose, not JSON            [P2-11 family]
@@ -598,19 +656,24 @@ Every safety net in the chain degraded *silently and in the same direction*: tow
    the alerts index
 4. **P1-6** `(src.get("host") or {})` in `_summarize_hits`
 
+**Independently — restores the other dead input to `impact_if_true`:**
+
+5. **P0-4** iTop: flat `operation` payload, flat response parsing, `FunctionalCI`
+   class, `business_criticity` / `organization_name` field names
+
 **Then, before any further production traffic:**
 
-5. **P0-3** Structural floor — empty evidence ⇒ `needs_review`, `close_fp` unreachable
-6. **P0-2** Gate the FP write on evidence quality; purge the 2 poisoned rows
-7. **P1-8** Pass `canonical_alert` into `_build_from_tool_results`
+6. **P0-3** Structural floor — empty evidence ⇒ `needs_review`, `close_fp` unreachable
+7. **P0-2** Gate the FP write on evidence quality; purge the 2 poisoned rows
+8. **P1-8** Pass `canonical_alert` into `_build_from_tool_results`
 
 **Then hardening:**
 
-8. **P1-9** Non-blocking handler + API key on `/triage`
-9. **P1-7** Structured tool-failure envelope so gaps ≠ absence
-10. **P1-10** Deploy Redis, or fingerprint-dedup in SQLite alongside `fp_events`
-11. **P2-11** Test `perceive` on `qwen3:8b`; enable Ollama `format: "json"`
-12. **P2-15** Rotate credentials, `.gitignore` the `.env`
+9. **P1-9** Non-blocking handler + API key on `/triage`
+10. **P1-7** Structured tool-failure envelope so gaps ≠ absence
+11. **P1-10** Deploy Redis, or fingerprint-dedup in SQLite alongside `fp_events`
+12. **P2-11** Test `perceive` on `qwen3:8b`; enable Ollama `format: "json"`
+13. **P2-15** Rotate credentials, `.gitignore` the `.env`
 
 **Regression tests worth adding:**
 
